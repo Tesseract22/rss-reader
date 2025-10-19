@@ -1,0 +1,3 @@
+[submodule "zig-xml"]
+	path = zig-xml
+	url = https://github.com/ianprime0509/zig-xml.git
