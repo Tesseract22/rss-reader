@@ -15,6 +15,7 @@ const XmlParserError = XmlError || error {
     DuplicateField,
     UnsetField,
     OutOfMemory,
+    WriteFailed,
 };
 
 fn ParseState(comptime info: std.builtin.Type.Struct) type {
@@ -39,12 +40,28 @@ fn parse_state(comptime info: std.builtin.Type.Struct) ParseState(info) {
 }
 
 fn is_non_str_slice(comptime T: type) bool {
-    if (T == []const u8 or T == []u8) return false;
     const info = @typeInfo(T);
     return switch (info) {
-        .pointer => |ptr| ptr.size == .slice,
+        .pointer => |ptr|
+            switch (ptr.size) {
+                .slice => ptr.child != u8,
+                else => false,
+        },
         else => false,
     };
+}
+
+fn is_str_slice(comptime T: type) bool {
+    const info = @typeInfo(T);
+    return switch (info) {
+        .pointer => |ptr|
+            switch (ptr.size) {
+                .slice => ptr.child == u8,
+                else => false,
+        },
+        else => false,
+    };
+
 }
 
 /// Parse the xml and tries to match elements to struct field
@@ -89,7 +106,7 @@ fn parse_struct_inner(comptime T: type, reader: *xml.Reader, maybe_start_el_name
                 inline for (struct_info.fields, &field_states) |f, *state| {
                     if (comptime is_non_str_slice(f.type)) {
                         @field(res, f.name) = try state.toOwnedSlice(str_alloc); 
-                    } else if (f.type == []const u8) {
+                    } else if (is_str_slice(f.type)) {
                         if (!state.*)
                             @field(res, f.name) = f.defaultValue() orelse 
                                 return XmlParserError.UnsetField;
@@ -112,11 +129,12 @@ fn parse_struct_inner(comptime T: type, reader: *xml.Reader, maybe_start_el_name
                         reader, name, str_alloc);
                     try state.append(str_alloc, sub_el); 
                     break;
-                } else if (f.type == []const u8) {
+                } else if (is_str_slice(f.type)) {
                     if (state.*)
                         return XmlParserError.DuplicateField;
                     state.* = true;
-                    @field(&res, f.name) = try reader.readElementTextAlloc(str_alloc);
+                    const text = try reader.readElementText();
+                    @field(&res, f.name) = try str_alloc.dupeZ(u8, text);
                     // try expect_element_end_name(reader, f.name);
                     break;
                 }
