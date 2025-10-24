@@ -37,8 +37,8 @@ pub fn Context(comptime T: type) type {
         base_frag_shader: GLObj,
         
         // base_VBO: GLObj,
-        // base_VAO: GLObj,
-        // base_EAO: GLObj,
+        base_VAO: GLObj,
+        base_EBO: GLObj,
        
         const Self = @This();
         pub fn init(self: *Self, user_data: *T, render_fn: *const fn (ctx: Self) void,
@@ -68,12 +68,31 @@ pub fn Context(comptime T: type) type {
             const base_vs = try load_shader(base_vs_src, g.GL_VERTEX_SHADER);
             const base_fs = try load_shader(base_fs_src, g.GL_FRAGMENT_SHADER);
             const base_pgm = try create_program(base_vs, base_fs);
-            c.RGFW_window_setUserPtr(win, self);
+
+            g.glGenVertexArrays(1, &self.base_VAO);
+            g.glBindVertexArray(self.base_VAO);
+            bind_vertex_attr(BaseVertexData) catch unreachable;
+            g.glBindVertexArray(0);
+
+
+            const square_indices = [_]Vec3u {
+                .{ 0, 1, 3},
+                .{ 0, 2, 3},
+            };
+
+            g.glGenBuffers(1, &self.base_EBO);
+            g.glBindBuffer(g.GL_ELEMENT_ARRAY_BUFFER, self.base_EBO);
+            g.glBufferData(g.GL_ELEMENT_ARRAY_BUFFER, 
+                @sizeOf(@TypeOf(square_indices)), &square_indices, g.GL_STATIC_DRAW);
+
+
             self.window = win;
             self.render_fn = render_fn; self.user_data = user_data;
             self.base_shader_pgm = base_pgm;
             self.base_vert_shader = base_vs;
             self.base_frag_shader = base_fs;
+
+            c.RGFW_window_setUserPtr(win, self);
         }
 
         pub fn window_should_close(self: Self) bool {
@@ -126,29 +145,20 @@ pub fn Context(comptime T: type) type {
             };
     
 
-            const indices = [_]Vec3u {
-                .{ 0, 1, 3},
-                .{ 0, 2, 3},
-            };
-
+            
             g.glUseProgram(self.base_shader_pgm);
 
+            // upload vertexes attributes to GPU
             var VBO: GLObj = undefined;
             g.glGenBuffers(1, &VBO);
+            defer g.glDeleteBuffers(1, &VBO);
             g.glBindBuffer(g.GL_ARRAY_BUFFER, VBO);
             g.glBufferData(g.GL_ARRAY_BUFFER, @sizeOf(@TypeOf(vertexes)), &vertexes, g.GL_STATIC_DRAW);
 
-            var VAO: GLObj = undefined;
-            g.glGenVertexArrays(1, &VAO);
-            g.glBindVertexArray(VAO);
-
-            bind_vertex_attr(BaseVertexData) catch unreachable;
-
-            var EBO: GLObj = undefined;
-            g.glGenBuffers(1, &EBO);
-            g.glBindBuffer(g.GL_ELEMENT_ARRAY_BUFFER, EBO);
-            g.glBufferData(g.GL_ELEMENT_ARRAY_BUFFER, @sizeOf(@TypeOf(indices)), &indices, g.GL_STATIC_DRAW);
-
+            g.glBindVertexArray(self.base_VAO);
+            g.glBindBuffer(g.GL_ELEMENT_ARRAY_BUFFER, self.base_EBO);
+            
+            
 
             g.glDrawElements(g.GL_TRIANGLES, 6, g.GL_UNSIGNED_INT, @ptrFromInt(0));
 
