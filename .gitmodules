@@ -7,3 +7,6 @@
 [submodule "thirdparty/thirdparty/zig-xml"]
 	path = thirdparty/thirdparty/zig-xml
 	url = https://github.com/ianprime0509/zig-xml.git
+[submodule "thirdparty/zig-xml"]
+	path = thirdparty/zig-xml
+	url = https://github.com/ianprime0509/zig-xml.git

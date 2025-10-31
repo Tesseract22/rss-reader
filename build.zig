@@ -1,23 +1,5 @@
 const std = @import("std");
 
-
-pub fn add_ui(b: *std.Build, mod: *std.Build.Module, is_windows: bool) void {
-    mod.addCSourceFile(.{
-        .flags = &.{ "-DRGFW_IMPLEMENTATION", "-DRGFW_OPENGL", "-DRGFW_ADVANCED_SMOOTH_RESIZE" },
-        .language = .c,
-        .file = b.path("thirdparty/RGFW/RGFW.h"),
-    });
-    mod.addCSourceFile(.{
-        .flags = &.{ "-DGLAD_GL_IMPLEMENTATION", "-DGLAD_MALLOC=malloc", "-DGLAD_FREE=free" },
-        .language = .c,
-        .file = b.path("thirdparty/glad.h"),
-    });
-    if (is_windows) {
-        mod.linkSystemLibrary("gdi32", .{});
-        mod.linkSystemLibrary("opengl32", .{});
-    }
-}
-
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -49,20 +31,6 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/gui_ref.zig"),
 
     });
-    gui_ref_mod.addIncludePath(b.path("."));
-    add_ui(b, gui_ref_mod, target.result.os.tag == .windows);
-
-    const gui_mod = b.addModule("gui", .{
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .root_source_file = b.path("src/gui.zig"),
-
-    });
-
-    gui_mod.addIncludePath(b.path("."));
-    add_ui(b, gui_mod, target.result.os.tag == .windows);
-
 
     const xml_ref_mod = b.addModule("rss", .{
         .target = target,
@@ -72,17 +40,22 @@ pub fn build(b: *std.Build) void {
 
     const zig_xml = b.dependency("zigxml", .{ .target = target, .optimize = optimize });
     const zig_sqlite = b.dependency("zigsqlite", .{ .target = target, .optimize = optimize });
+    const zig2d = b.dependency("zig2d", .{ .target = target, .optimize = optimize });
+
     main_mod.addImport("xml", zig_xml.module("xml"));
     main_mod.addImport("sqlite", zig_sqlite.module("sqlite"));
     xml_ref_mod.addImport("xml", zig_xml.module("xml"));
+    gui_ref_mod.addImport("gl", zig2d.module("gl"));
+
+    
+    //
+    // Create & Install exes'
+    //
     const main = b.addExecutable(.{
         .name = "main",
         .root_module = main_mod,
     });
 
-    //
-    // Create & Install exes'
-    //
     b.installArtifact(main);
 
     const gui_ref = b.addExecutable(.{
@@ -91,12 +64,7 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(gui_ref);
 
-    const gui = b.addExecutable(.{
-        .name = "gui",
-        .root_module = gui_mod
-    });
-    b.installArtifact(gui);
-
+    
     const xml_ref = b.addExecutable(.{
         .name = "xml_ref",
         .root_module = xml_ref_mod
