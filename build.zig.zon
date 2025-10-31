@@ -11,7 +11,7 @@
             .path = "thirdparty/zig-sqlite",
         },
         .zig2d = .{
-            .path = "2d.zig",
+            .path = "zig2d",
         },
     }
 }

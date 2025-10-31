@@ -13,15 +13,6 @@ pub fn build(b: *std.Build) void {
     main_mod.addCSourceFile(.{
         .file = b.path("thirdparty/strptime/LibOb_strptime.c"),
     });
-    main_mod.addCSourceFile(.{
-        .flags = &.{ "-DRGFW_IMPLEMENTATION", "-DRGFW_OPENGL" },
-        .language = .c,
-        .file = b.path("thirdparty/RGFW/RGFW.h"),
-    });
-    if (target.result.os.tag == .windows)
-        main_mod.linkSystemLibrary("gdi32", .{});
-
-    main_mod.sanitize_c = .full;
     main_mod.addIncludePath(b.path("."));
 
     const gui_ref_mod = b.addModule("gui_ref", .{
@@ -44,6 +35,8 @@ pub fn build(b: *std.Build) void {
 
     main_mod.addImport("xml", zig_xml.module("xml"));
     main_mod.addImport("sqlite", zig_sqlite.module("sqlite"));
+    main_mod.addImport("gl", zig2d.module("gl"));
+
     xml_ref_mod.addImport("xml", zig_xml.module("xml"));
     gui_ref_mod.addImport("gl", zig2d.module("gl"));
 

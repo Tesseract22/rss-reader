@@ -1,4 +1,4 @@
-const std = @import("std");
+const std = @import("std"); const Allocator = std.mem.Allocator;
 const sqlite = @import("sqlite");
 const Sqlite = @This();
 
@@ -104,6 +104,17 @@ pub fn add_posts(self: *Sqlite, channel: Ds.Channel) !void {
         });
     }
     savepoint.commit();
+}
+
+pub fn get_posts_all(self: *Sqlite, a: Allocator) ![]Ds.Item {
+    const q =
+        \\SELECT title, pubDate, link, link, description
+        \\from post
+        ;
+    var stmt = try self.db.prepare(q);
+    defer stmt.deinit();
+
+    return stmt.all(Ds.Item, a, .{}, .{});
 }
 
 

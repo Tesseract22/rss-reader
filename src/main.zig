@@ -1,8 +1,19 @@
 const std = @import("std");
 const log = std.log;
+
 const xml = @import("xml");
+
 const Sqlite = @import("sqlite.zig");
 const parser = @import("xml_parser.zig");
+
+const gl = @import("gl");
+const Vec2 = gl.Vec2;
+const c = gl.c;
+
+const RGBA = gl.RGBA;
+
+const bg_color = RGBA.from_u32(0x303030ff);
+
 
 const assert = std.debug.assert;
 const fatal = std.process.fatal;
@@ -70,25 +81,7 @@ fn parse_rss_buf(buf: []const u8, gpa: Allocator, arena: Allocator) !Channel {
     return channel;
 }
 
-pub fn main() !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .{};
-    defer _ = gpa_state.deinit();
-    const gpa = gpa_state.allocator();
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-
-    const args = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, args);
-    if (args.len != 2) {
-        return error.InvalidArguments; // usage: reader file
-    }
-    const url = args[1];
-
-    std.log.debug("init database.", .{});
-    var db = try Sqlite.init("feed.db");
-    defer db.deinit();
-    
-
+fn fetch_rss_and_update(url: []const u8, db: *Sqlite, gpa: Allocator, arena: Allocator) !void {
     var client = std.http.Client { .allocator = gpa };
     defer client.deinit();
 
@@ -105,8 +98,8 @@ pub fn main() !void {
     // var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
     // const stdout = &stdout_writer.interface;
 
-    
-    const channel = try parse_rss_buf(fetch_sink.written(), gpa, arena.allocator());
+
+    const channel = try parse_rss_buf(fetch_sink.written(), gpa, arena);
     std.debug.print("Channel: {s}\n{s}\n{s}\n", .{ channel.title, channel.link, channel.description });
     std.debug.print("Channel extra: {s}\n", .{ channel.language });
     for (channel.item) |item| {
@@ -114,6 +107,137 @@ pub fn main() !void {
     }
 
     try db.add_posts(channel);
+
+}
+
+const UIContext = gl.Context(UI);
+const UI = struct {
+    const scroll_spd = 0.5;
+    gpa: Allocator,
+    selected_title: []const u8 = "",
+    main_scroll: f32 = 0,
+    posts: []Item,
+    
+    // const titles: []const []const u8 = &.{ "Title A", "Title B" };
+    pub const ScrollBox = struct {
+        botleft: Vec2,
+        size: Vec2,
+        scroll: f32
+    };
+    const Box = struct {
+        botleft: Vec2,
+        size: Vec2,
+    };
+
+    fn render(ctx: *UIContext) void {
+        const ui = ctx.user_data;
+        const dt = ctx.get_delta_time();
+
+        ctx.clear(bg_color);
+        const btn_h = ctx.cal_font_h(0.5) * 2;
+        // for (titles, 1..) |title, i| {
+        //     const if32: f32 = @floatFromInt(i);
+        //     if (button(
+        //             ctx,
+        //             .{ ctx.x_left(), ctx.y_top()-if32*btn_h }, 
+        //             .{ 0.3, btn_h },
+        //             0.5,
+        //             title)) {
+        //         // std.log.debug("Cliekd", .{}); 
+        //         ui.selected_title = title;
+        //     }
+        // }
+        const titles_h = @as(f32, @floatFromInt(ui.posts.len)) * btn_h;
+
+        ctx.draw_rect_lines(.{ ctx.x_left(), ctx.y_bot() }, .{ 0.3, ctx.screen_h() }, 5, .from_u32(0xffffff30));
+
+        for (ui.posts, 1..) |post, i| {
+            const if32: f32 = @floatFromInt(i);
+            if (button(
+                    ctx,
+                    .{ ctx.x_left()+0.3, ctx.y_top()-if32*btn_h+ui.main_scroll }, 
+                    .{  ctx.screen_w()-0.3, btn_h },
+                    0.5,
+                    post.title)) {
+                // std.log.debug("Cliekd", .{}); 
+                ui.selected_title = post.title;
+            }
+        }
+
+        const scroll_bar_w = 0.04;
+        const scroll_bar_h = (ctx.screen_h() / titles_h) * ctx.screen_h();
+        const scroll_bar = Box {
+            .botleft = .{ ctx.x_right()-scroll_bar_w, ctx.y_top() - ui.main_scroll/titles_h*ctx.screen_h()-scroll_bar_h },
+            .size =.{ scroll_bar_w, scroll_bar_h },
+        };
+        ctx.draw_rect(.{ ctx.x_right()-scroll_bar_w, ctx.y_bot() }, .{ scroll_bar_w, ctx.screen_h() }, .from_u32(0x7f7f7fdf));
+        ctx.draw_rect(
+            scroll_bar.botleft,
+            scroll_bar.size,
+            .from_u32(0x3f3f3fff));
+
+        if (within_rect(ctx.mouse_pos_gl, scroll_bar)) {
+            if (c.RGFW_isMouseDown(c.RGFW_mouseLeft) == 1) {
+                ui.main_scroll += ctx.mouse_delta[1]*titles_h/ctx.screen_h(); 
+            }
+        }
+        // ctx.draw_text(.{0, 0}, 1, ctx.input_chars.items, .white);
+
+        if (gl.c.RGFW_isKeyDown(gl.c.RGFW_up) == 1) ui.main_scroll -= scroll_spd * dt;
+        if (gl.c.RGFW_isKeyDown(gl.c.RGFW_down) == 1) ui.main_scroll += scroll_spd * dt;
+        ui.main_scroll -= ctx.mouse_scroll[1] * dt * 10;
+        ui.main_scroll = std.math.clamp(ui.main_scroll, 0, titles_h-ctx.screen_h());
+        // std.log.info("Mouse gl pos: {any} {any}", .{ctx.mouse_pos_gl, ctx.mouse_pos_screen});
+        // std.log.info("Mouse scroll: {any}", .{ctx.mouse_scroll});
+    }
+
+    // retunr true if hovered
+    fn button(ctx: *UIContext, botleft: Vec2, size: Vec2, font_size: f32, text: []const u8) bool {
+        const within = within_rect(ctx.mouse_pos_gl, .{ .botleft = botleft, .size = size });
+        if (within) {
+            ctx.draw_rect(botleft, size, .from_u32(0xffffff30));
+        }
+        // const yoffset = 0.1*ctx.cal_font_h(0.5);
+        ctx.draw_text(.{ botleft[0], botleft[1] + (size[1]-ctx.cal_font_h(font_size))/2 }, font_size, text, .white);
+        ctx.draw_rect_lines(botleft, size, 5, .from_u32(0xffffff30));
+        return within and ctx.mouse_left;
+    }
+
+    fn within_rect(p: Vec2, box: Box) bool {
+        const botleft = box.botleft;
+        const size = box.size;
+        return p[0] >= botleft[0] and p[1] >= botleft[1]
+            and p[0] <= botleft[0] + size[0] and p[1] <= botleft[1] + size[1];
+    }
+};
+
+
+pub fn main() !void {
+    var gpa_state: std.heap.GeneralPurposeAllocator(.{}) = .{};
+    // defer _ = gpa_state.deinit();
+    const gpa = gpa_state.allocator();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+
+    const args = try std.process.argsAlloc(gpa);
+    defer std.process.argsFree(gpa, args);
+
+    std.log.debug("init database.", .{});
+    var db = try Sqlite.init("feed.db");
+    defer db.deinit();
+    
+
+    var ui = UI { .gpa = gpa, .posts = try db.get_posts_all(gpa) };
+    var ctx: UIContext = undefined;
+    try UIContext.init(&ctx, &ui, UI.render, "ui demo", 1920, 1024, gpa);
+    std.log.info("posts: {}", .{ ui.posts.len });
+    while (!ctx.window_should_close()) {
+        ctx.render();
+    }
+
+    ctx.close_window();
+
+
 }
 
 test {
