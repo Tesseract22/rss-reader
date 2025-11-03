@@ -127,6 +127,10 @@ const UI = struct {
     const Box = struct {
         botleft: Vec2,
         size: Vec2,
+
+        pub fn x_right(self: Box) f32 {
+            return self.botleft[0] + self.size[0]; 
+        }
     };
 
     fn render(ctx: *UIContext) void {
@@ -164,29 +168,8 @@ const UI = struct {
             }
         }
 
-        const scroll_bar_w = 0.04;
-        const scroll_bar_h = (ctx.screen_h() / titles_h) * ctx.screen_h();
-        const scroll_bar = Box {
-            .botleft = .{ ctx.x_right()-scroll_bar_w, ctx.y_top() - ui.main_scroll/titles_h*ctx.screen_h()-scroll_bar_h },
-            .size =.{ scroll_bar_w, scroll_bar_h },
-        };
-        ctx.draw_rect(.{ ctx.x_right()-scroll_bar_w, ctx.y_bot() }, .{ scroll_bar_w, ctx.screen_h() }, .from_u32(0x7f7f7fdf));
-        ctx.draw_rect(
-            scroll_bar.botleft,
-            scroll_bar.size,
-            .from_u32(0x3f3f3fff));
-
-        if (within_rect(ctx.mouse_pos_gl, scroll_bar)) {
-            if (c.RGFW_isMouseDown(c.RGFW_mouseLeft) == 1) {
-                ui.main_scroll += ctx.mouse_delta[1]*titles_h/ctx.screen_h(); 
-            }
-        }
-        // ctx.draw_text(.{0, 0}, 1, ctx.input_chars.items, .white);
-
-        if (gl.c.RGFW_isKeyDown(gl.c.RGFW_up) == 1) ui.main_scroll -= scroll_spd * dt;
-        if (gl.c.RGFW_isKeyDown(gl.c.RGFW_down) == 1) ui.main_scroll += scroll_spd * dt;
-        ui.main_scroll -= ctx.mouse_scroll[1] * dt * 10;
-        ui.main_scroll = std.math.clamp(ui.main_scroll, 0, titles_h-ctx.screen_h());
+        const main_box = Box { .botleft =. { ctx.x_left()+0.3, ctx.y_bot() }, .size = .{ ctx.screen_w()-0.3, ctx.screen_h() } };
+        scroll_box(ctx, main_box, &ctx.main_scroll, titles_h);
         // std.log.info("Mouse gl pos: {any} {any}", .{ctx.mouse_pos_gl, ctx.mouse_pos_screen});
         // std.log.info("Mouse scroll: {any}", .{ctx.mouse_scroll});
     }
@@ -203,11 +186,44 @@ const UI = struct {
         return within and ctx.mouse_left;
     }
 
+    fn scroll_box(ctx: *UIContext, box: Box, scroll: *f32, scroll_h: f32) void {
+        // const ui = ctx.user_data;
+        const dt = ctx.get_delta_time();
+        const scroll_bar_w = 0.02;
+        const scroll_bar_h = (box.size[1] / scroll_h) * box.size[1];
+        const scroll_bar = Box {
+            .botleft = .{ box.x_right()-scroll_bar_w, box.y_top() - scroll.*/scroll_h*ctx.screen_h()-scroll_bar_h },
+            .size =.{ scroll_bar_w, scroll_bar_h },
+        };
+        // Scroll bar background
+        ctx.draw_rect(.{ box.x_right()-scroll_bar_w, box.y_bot() }, .{ scroll_bar_w, box.size[1] }, .from_u32(0x7f7f7fdf));
+        // Scroll bar itself
+        ctx.draw_rect(
+            scroll_bar.botleft,
+            scroll_bar.size,
+            .from_u32(0x3f3f3fff));
+
+        if (mouse_within_rect(ctx, scroll_bar) and c.RGFW_isMouseDown(c.RGFW_mouseLeft) == 1) {
+            scroll.* += ctx.mouse_delta[1]*scroll_h/box.size(); 
+        }
+        // ctx.draw_text(.{0, 0}, 1, ctx.input_chars.items, .white);
+
+        if (gl.c.RGFW_isKeyDown(gl.c.RGFW_up) == 1) scroll.* -= scroll_spd * dt;
+        if (gl.c.RGFW_isKeyDown(gl.c.RGFW_down) == 1) scroll.* += scroll_spd * dt;
+        scroll.* -= ctx.mouse_scroll[1] * dt * 10;
+        scroll.* = std.math.clamp(scroll.*, 0, scroll_h-box.size[1]);
+
+    }
+
     fn within_rect(p: Vec2, box: Box) bool {
         const botleft = box.botleft;
         const size = box.size;
         return p[0] >= botleft[0] and p[1] >= botleft[1]
             and p[0] <= botleft[0] + size[0] and p[1] <= botleft[1] + size[1];
+    }
+
+    fn mouse_within_rect(ctx: UIContext, box: Box) bool {
+        return within_rect(ctx.mouse_pos_gl, box);
     }
 };
 

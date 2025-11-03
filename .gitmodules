@@ -1,15 +1,9 @@
-[submodule "zig-xml"]
-	path = zig-xml
-	url = https://github.com/ianprime0509/zig-xml.git
-[submodule "thirdparty/zig-sqlite"]
-	path = thirdparty/zig-sqlite
-	url = https://github.com/vrischmann/zig-sqlite.git
-[submodule "thirdparty/thirdparty/zig-xml"]
-	path = thirdparty/thirdparty/zig-xml
-	url = https://github.com/ianprime0509/zig-xml.git
-[submodule "thirdparty/zig-xml"]
-	path = thirdparty/zig-xml
-	url = https://github.com/ianprime0509/zig-xml.git
 [submodule "zig2d"]
 	path = zig2d
 	url = git@github.com:Tesseract22/zig2d.git
+[submodule "thidparty/zig-xml"]
+	path = thirdparty/zig-xml
+	url = https://github.com/ianprime0509/zig-xml.git
+[submodule "thidparty/zig-sqlite"]
+	path = thirdparty/zig-sqlite
+	url = https://github.com/vrischmann/zig-sqlite.git
