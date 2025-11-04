@@ -110,20 +110,63 @@ fn fetch_rss_and_update(url: []const u8, db: *Sqlite, gpa: Allocator, arena: All
 
 }
 
+var should_quit = false;
+
+var db_mutex = std.Thread.Mutex {};
+var db_cond = std.Thread.Condition {};
+var db_rss_url: []const u8 = "";
+var db_err_str: []const u8 = "";
+var db_fetch_complete: std.atomic.Value(bool) = .init(false);
+
+fn db_worker(db: *Sqlite, gpa: Allocator) void {
+    db_mutex.lock();
+    defer db_mutex.unlock();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    while (!should_quit) {
+        db_cond.wait(&db_mutex);
+        if (should_quit) break;
+        _ = arena.reset(.retain_capacity);
+        fetch_rss_and_update(db_rss_url, db, gpa, arena.allocator()) catch |e| {
+            db_err_str = @errorName(e);
+        };
+        db_fetch_complete.store(true, .release);
+        
+    }
+}
+
 const UIContext = gl.Context(UI);
 const UI = struct {
     const scroll_spd = 0.5;
     gpa: Allocator,
-    selected_title: []const u8 = "",
-    main_scroll: f32 = 0,
+
+    main_scroll: Scroll = .{ .scroll = 0, .clicked = false },
+    input: Input = .{},
+
+    db: *Sqlite,
     posts: []Item,
+    channels: [][]const u8,
     
     // const titles: []const []const u8 = &.{ "Title A", "Title B" };
-    pub const ScrollBox = struct {
-        botleft: Vec2,
-        size: Vec2,
-        scroll: f32
+    pub const Scroll = struct {
+        scroll: f32,
+        clicked: bool,
     };
+
+    pub const Input = struct {
+        content: std.ArrayList(u8) = .empty,
+        focused: bool = false,
+    };
+
+    // Defines a box by its bottem left corner and size.
+    //
+    //      |------|
+    //      |      | h
+    //      |------|
+    //     /   w   
+    //  (x,y)
+    //
+    // Some helpers are provided to create from other position.
     const Box = struct {
         botleft: Vec2,
         size: Vec2,
@@ -131,87 +174,203 @@ const UI = struct {
         pub fn x_right(self: Box) f32 {
             return self.botleft[0] + self.size[0]; 
         }
+
+        pub fn y_top(self: Box) f32 {
+            return self.botleft[1] + self.size[1]; 
+        }
+
+        pub fn top(self: Box, perct: f32) f32 {
+            return self.botleft[1] + (1-perct)*self.size[1];
+        }
+
+        // Create a box where,
+        //
+        //         |------|
+        // (x,y) --|      | h
+        //         |------|
+        //            w   
+        pub fn from_centerleft(centerleft: Vec2, size: Vec2) Box {
+            const x, const y = centerleft;
+            return .{
+                .botleft = .{ x, y-size[1]/2 },
+                .size = size,
+            };
+        }
     };
 
     fn render(ctx: *UIContext) void {
         const ui = ctx.user_data;
-        const dt = ctx.get_delta_time();
+        // const dt = ctx.get_delta_time();
 
         ctx.clear(bg_color);
+        const left_box = Box { .botleft = .{ ctx.x_left(), ctx.y_bot() }, .size = .{ 0.3, ctx.screen_h()-0.1 } };
         const btn_h = ctx.cal_font_h(0.5) * 2;
-        // for (titles, 1..) |title, i| {
-        //     const if32: f32 = @floatFromInt(i);
-        //     if (button(
-        //             ctx,
-        //             .{ ctx.x_left(), ctx.y_top()-if32*btn_h }, 
-        //             .{ 0.3, btn_h },
-        //             0.5,
-        //             title)) {
-        //         // std.log.debug("Cliekd", .{}); 
-        //         ui.selected_title = title;
-        //     }
-        // }
+
+        ctx.begin_scissor_gl_coord(left_box.botleft, left_box.size);
+        for (ui.channels, 1..) |channel_title, i| {
+            const if32: f32 = @floatFromInt(i);
+            if (button(
+                    ctx,
+                    .{ ctx.x_left(), left_box.y_top()-if32*btn_h }, 
+                    .{ 0.3, btn_h },
+                    0.5,
+                    channel_title)) {
+                // std.log.debug("Cliekd", .{}); 
+                // ui.selected_title = channel_title;
+            }
+        }
+        const plus_size = ctx.get_char_size(1, '+');
+        const add_btn_side = btn_h;
+        const top_menu_y_center = ctx.y_top()-add_btn_side/2.0-0.015;
+        const add_box = Box.from_centerleft(.{ ctx.x_left()+0.01, top_menu_y_center }, .{ add_btn_side, add_btn_side });
+        ctx.end_scissor();
+
+        if (button_ex(ctx, add_box.botleft, add_box.size, 1, "+",
+                .{ (add_box.size[0]-plus_size[0])/2-ctx.pixels(1), (add_box.size[1]-plus_size[1])/2 })) {
+            db_mutex.lock();
+            defer db_mutex.unlock();
+            const url = ui.input.content.items;
+
+            db_fetch_complete.store(false, .release);
+            db_rss_url = url;
+            db_cond.signal();
+            // fetch_rss_and_update(url, ui.db, ui.gpa, arena.allocator()) catch |e| {
+            //     std.log.err("failed to fetch and update rss from {s}: {}", .{ url, e });
+            // };
+                    }
+
+        if (db_fetch_complete.load(.acquire)) {
+            ui.posts = ui.db.get_posts_all(ui.gpa) catch unreachable;
+            ui.channels = ui.db.get_channels_all(ui.gpa) catch unreachable;
+        }
+        
+        input_box(ctx,
+            .from_centerleft(.{ add_box.x_right() + 0.01, top_menu_y_center }, .{ 1, add_btn_side }),
+            &ui.input, "Enter url of rss here...", ui.gpa);
+        // ctx.draw_text(.{ ctx.x_left()+add_btn_side+0.05, ctx.y_top()-(add_btn_side+ctx.cal_font_h(0.5))/2-0.015}, 0.5, ui.input.items, .white);
+        // ctx.draw_rect(.{ add_btn_pos[0]+(add_btn_size[0]-plus_size[0])/2, add_btn_pos[1]+(add_btn_size[1]-plus_size[1])/2 }, plus_size,.white);
+
         const titles_h = @as(f32, @floatFromInt(ui.posts.len)) * btn_h;
 
-        ctx.draw_rect_lines(.{ ctx.x_left(), ctx.y_bot() }, .{ 0.3, ctx.screen_h() }, 5, .from_u32(0xffffff30));
+        // ctx.draw_rect_lines(.{ ctx.x_left(), ctx.y_bot() }, .{ 0.3, ctx.screen_h() }, 5, .from_u32(0xffffff30));
 
+        const main_box = Box { .botleft = .{ ctx.x_left()+0.3, ctx.y_bot() }, .size = .{ ctx.screen_w()-0.3, ctx.screen_h()-0.1 } };
+        ctx.begin_scissor_gl_coord(main_box.botleft, main_box.size);
         for (ui.posts, 1..) |post, i| {
             const if32: f32 = @floatFromInt(i);
             if (button(
                     ctx,
-                    .{ ctx.x_left()+0.3, ctx.y_top()-if32*btn_h+ui.main_scroll }, 
+                    .{ main_box.botleft[0], main_box.top(0)-if32*btn_h + ui.main_scroll.scroll*titles_h }, 
                     .{  ctx.screen_w()-0.3, btn_h },
                     0.5,
                     post.title)) {
                 // std.log.debug("Cliekd", .{}); 
-                ui.selected_title = post.title;
             }
         }
+        ctx.end_scissor();
 
-        const main_box = Box { .botleft =. { ctx.x_left()+0.3, ctx.y_bot() }, .size = .{ ctx.screen_w()-0.3, ctx.screen_h() } };
-        scroll_box(ctx, main_box, &ctx.main_scroll, titles_h);
+        scroll_box(ctx, main_box, &ui.main_scroll, titles_h);
+        ctx.draw_rect_lines(main_box.botleft, main_box.size, 1, .yellow);
         // std.log.info("Mouse gl pos: {any} {any}", .{ctx.mouse_pos_gl, ctx.mouse_pos_screen});
         // std.log.info("Mouse scroll: {any}", .{ctx.mouse_scroll});
     }
 
     // retunr true if hovered
-    fn button(ctx: *UIContext, botleft: Vec2, size: Vec2, font_size: f32, text: []const u8) bool {
+    fn button_ex(ctx: *UIContext, botleft: Vec2, size: Vec2, font_size: f32, text: []const u8, text_offset: Vec2) bool {
         const within = within_rect(ctx.mouse_pos_gl, .{ .botleft = botleft, .size = size });
         if (within) {
-            ctx.draw_rect(botleft, size, .from_u32(0xffffff30));
+            if (gl.c.RGFW_isMouseDown(gl.c.RGFW_mouseLeft) == 1)
+                ctx.draw_rect(botleft, size, .from_u32(0x00000030))
+            else
+                ctx.draw_rect(botleft, size, .from_u32(0xffffff30));
         }
         // const yoffset = 0.1*ctx.cal_font_h(0.5);
-        ctx.draw_text(.{ botleft[0], botleft[1] + (size[1]-ctx.cal_font_h(font_size))/2 }, font_size, text, .white);
+        // ctx.draw_rect(botleft, size,.from_u32(0xffffff30));
+        ctx.draw_text(.{ botleft[0] + text_offset[0], botleft[1] + text_offset[1] }, font_size, text, .white);
+        // ctx.draw_rect_lines(.{ botleft[0] + text_offset[0], botleft[1] + text_offset[1] }, size, 1, .{ .r = 0xff, .a = 0x7f });
         ctx.draw_rect_lines(botleft, size, 5, .from_u32(0xffffff30));
-        return within and ctx.mouse_left;
+        return within and gl.c.RGFW_isMouseReleased(gl.c.RGFW_mouseLeft) == 1;
+    }
+    fn button(ctx: *UIContext, botleft: Vec2, size: Vec2, font_size: f32, text: []const u8) bool {
+        const text_offset = Vec2 { ctx.pixels(5), (size[1]-ctx.cal_font_h(font_size))/2 };
+        return button_ex(ctx, botleft, size, font_size, text, text_offset);
     }
 
-    fn scroll_box(ctx: *UIContext, box: Box, scroll: *f32, scroll_h: f32) void {
+    fn input_box(ctx: *UIContext, box: Box, input: *Input, hint_text: []const u8, a: Allocator) void {
+        const font_size = 0.5;
+        ctx.draw_rect(box.botleft, box.size, .white); 
+        const text_offset = Vec2 { ctx.pixels(5), (box.size[1]-ctx.cal_font_h(font_size))/2 };
+        if (input.content.items.len > 0)
+            ctx.draw_text(.{ box.botleft[0] + text_offset[0], box.botleft[1] + text_offset[1] }, font_size, input.content.items, .black)
+        else
+            ctx.draw_text(.{ box.botleft[0] + text_offset[0], box.botleft[1] + text_offset[1] }, font_size, hint_text, .from_u32(0x7f7f7fff));
+
+
+        if (ctx.mouse_left)
+            input.focused = mouse_within_rect(ctx, box);
+
+        if (input.focused) {
+            ctx.draw_rect_lines(box.botleft, box.size, 5, .yellow);
+            input.content.appendSlice(a, ctx.input_chars.items) catch unreachable;
+            if (gl.c.RGFW_isKeyPressed(gl.c.RGFW_backSpace) == 1 and input.content.items.len > 0)
+                input.content.shrinkRetainingCapacity(input.content.items.len-1);
+            if (ctx.is_paste) {
+                const buf = ctx.clipboard();
+                std.log.debug("PASTE {s} {}", .{ buf, buf.len });
+                input.content.appendSlice(a, buf) catch unreachable;
+            }
+        } 
+        
+    } 
+
+    fn scroll_box(ctx: *UIContext, box: Box, scroll: *Scroll, scroll_h: f32) void {
         // const ui = ctx.user_data;
         const dt = ctx.get_delta_time();
-        const scroll_bar_w = 0.02;
+        const scroll_bar_w = @max(0.02, ctx.pixels(20));
         const scroll_bar_h = (box.size[1] / scroll_h) * box.size[1];
         const scroll_bar = Box {
-            .botleft = .{ box.x_right()-scroll_bar_w, box.y_top() - scroll.*/scroll_h*ctx.screen_h()-scroll_bar_h },
+            .botleft = .{ box.x_right()-scroll_bar_w, box.y_top() - scroll.scroll*box.size[1]-scroll_bar_h },
             .size =.{ scroll_bar_w, scroll_bar_h },
         };
+        if (scroll_h <= box.size[1]) return;
         // Scroll bar background
-        ctx.draw_rect(.{ box.x_right()-scroll_bar_w, box.y_bot() }, .{ scroll_bar_w, box.size[1] }, .from_u32(0x7f7f7fdf));
+        ctx.draw_rect(.{ box.x_right()-scroll_bar_w, box.botleft[1] }, .{ scroll_bar_w, box.size[1] }, .from_u32(0x7f7f7fdf));
         // Scroll bar itself
         ctx.draw_rect(
             scroll_bar.botleft,
             scroll_bar.size,
             .from_u32(0x3f3f3fff));
+        
 
-        if (mouse_within_rect(ctx, scroll_bar) and c.RGFW_isMouseDown(c.RGFW_mouseLeft) == 1) {
-            scroll.* += ctx.mouse_delta[1]*scroll_h/box.size(); 
+        // update scroll from inputs
+        if (mouse_within_rect(ctx, scroll_bar)) {
+            scroll.clicked = c.RGFW_isMousePressed(c.RGFW_mouseLeft) == 1 or scroll.clicked;
+        }
+
+        if (scroll.clicked) {
+            scroll.scroll += ctx.mouse_delta[1]/box.size[1]; 
+            ctx.draw_rect(scroll_bar.botleft, scroll_bar.size, .from_u32(0x00000030));
+            ctx.draw_rect_lines(
+                scroll_bar.botleft,
+                scroll_bar.size,
+                2,
+                .{ .r = 0xff, .g = 0xff, .b = 0, .a = 0xdf },
+            );
+            if (c.RGFW_isMouseReleased(c.RGFW_mouseLeft) == 1) scroll.clicked = false;
+        } else {
+            ctx.draw_rect_lines(
+                scroll_bar.botleft,
+                scroll_bar.size,
+                2,
+                .from_u32(0xffffffdf),
+            );
         }
         // ctx.draw_text(.{0, 0}, 1, ctx.input_chars.items, .white);
 
-        if (gl.c.RGFW_isKeyDown(gl.c.RGFW_up) == 1) scroll.* -= scroll_spd * dt;
-        if (gl.c.RGFW_isKeyDown(gl.c.RGFW_down) == 1) scroll.* += scroll_spd * dt;
-        scroll.* -= ctx.mouse_scroll[1] * dt * 10;
-        scroll.* = std.math.clamp(scroll.*, 0, scroll_h-box.size[1]);
+        if (gl.c.RGFW_isKeyDown(gl.c.RGFW_up) == 1) scroll.scroll -= scroll_spd * dt / scroll_h;
+        if (gl.c.RGFW_isKeyDown(gl.c.RGFW_down) == 1) scroll.scroll += scroll_spd * dt / scroll_h;
+        scroll.scroll -= ctx.mouse_scroll[1] * dt * 10 * scroll_spd / scroll_h;
+        scroll.scroll = std.math.clamp(scroll.scroll, 0, (scroll_h-box.size[1])/scroll_h);
 
     }
 
@@ -222,9 +381,13 @@ const UI = struct {
             and p[0] <= botleft[0] + size[0] and p[1] <= botleft[1] + size[1];
     }
 
-    fn mouse_within_rect(ctx: UIContext, box: Box) bool {
+    fn mouse_within_rect(ctx: *UIContext, box: Box) bool {
         return within_rect(ctx.mouse_pos_gl, box);
     }
+
+    // fn highlight_on_hover(ctx: *UIContext, box: Box) void {
+    //     if (mouse_within_rect)
+    // }
 };
 
 
@@ -241,19 +404,23 @@ pub fn main() !void {
     std.log.debug("init database.", .{});
     var db = try Sqlite.init("feed.db");
     defer db.deinit();
-    
+   
+    var db_worker_t = try std.Thread.spawn(.{}, db_worker, .{ &db, gpa });
 
-    var ui = UI { .gpa = gpa, .posts = try db.get_posts_all(gpa) };
+    var ui = UI { .gpa = gpa, .posts = try db.get_posts_all(gpa), .channels = try db.get_channels_all(gpa), .db = &db };
     var ctx: UIContext = undefined;
     try UIContext.init(&ctx, &ui, UI.render, "ui demo", 1920, 1024, gpa);
-    std.log.info("posts: {}", .{ ui.posts.len });
+    std.log.info("posts: {}, channels: {}", .{ ui.posts.len, ui.channels.len });
     while (!ctx.window_should_close()) {
         ctx.render();
     }
 
     ctx.close_window();
 
+    should_quit = true;
 
+    db_cond.signal();
+    db_worker_t.join();
 }
 
 test {

@@ -117,6 +117,17 @@ pub fn get_posts_all(self: *Sqlite, a: Allocator) ![]Ds.Item {
     return stmt.all(Ds.Item, a, .{}, .{});
 }
 
+pub fn get_channels_all(self: *Sqlite, a: Allocator) ![][]const u8 {
+    const q =
+        \\SELECT title
+        \\from channel
+        ;
+    var stmt = try self.db.prepare(q);
+    defer stmt.deinit();
+
+    return stmt.all([]const u8, a, .{}, .{});
+}
+
 
 // test "time convert" {
 //     var time_zone = time.LibOb_localTimeZone(0);

@@ -4,6 +4,6 @@
 [submodule "thidparty/zig-xml"]
 	path = thirdparty/zig-xml
 	url = https://github.com/ianprime0509/zig-xml.git
-[submodule "thidparty/zig-sqlite"]
+[submodule "thirdparty/zig-sqlite"]
 	path = thirdparty/zig-sqlite
 	url = https://github.com/vrischmann/zig-sqlite.git
