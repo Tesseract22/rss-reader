@@ -108,26 +108,40 @@ pub fn add_posts(self: *Sqlite, channel: Ds.Channel) sqlite.DynamicStatement.Pre
     savepoint.commit();
 }
 
-pub fn get_posts_all(self: *Sqlite, a: Allocator) ![]Ds.Item {
+pub const ItemWithChannel = struct {
+    title: [:0]const u8,
+    pubDate: [:0]const u8,
+    link: [:0]const u8,
+    guid: [:0]const u8,
+    description: [:0]const u8,
+    channel: u32,
+};
+
+pub const ChannelWithId = struct {
+    title: []const u8,
+    rowid: u32,
+};
+
+pub fn get_posts_all(self: *Sqlite, a: Allocator) ![]ItemWithChannel {
     const q =
-        \\SELECT title, pubDate, link, link, description
+        \\SELECT title, pubDate, link, link, description, channel
         \\from post
         ;
     var stmt = try self.db.prepare(q);
     defer stmt.deinit();
 
-    return stmt.all(Ds.Item, a, .{}, .{});
+    return stmt.all(ItemWithChannel, a, .{}, .{});
 }
 
-pub fn get_channels_all(self: *Sqlite, a: Allocator) ![][]const u8 {
+pub fn get_channels_all(self: *Sqlite, a: Allocator) ![]ChannelWithId {
     const q =
-        \\SELECT title
+        \\SELECT title, rowid
         \\from channel
         ;
     var stmt = try self.db.prepare(q);
     defer stmt.deinit();
 
-    return stmt.all([]const u8, a, .{}, .{});
+    return stmt.all(ChannelWithId, a, .{}, .{});
 }
 
 
