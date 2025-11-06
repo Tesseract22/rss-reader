@@ -8,6 +8,8 @@ const time = @cImport({
 
 const Ds = @import("main.zig");
 
+pub const Error = sqlite.DynamicStatement.PrepareError;
+
 db: sqlite.Db,
 
 pub fn init(path: [:0]const u8) !Sqlite {
@@ -51,7 +53,7 @@ fn convert_time_format(s: [:0]const u8) ?time.tm {
     return null;
 }
 
-pub fn add_posts(self: *Sqlite, channel: Ds.Channel) !void {
+pub fn add_posts(self: *Sqlite, channel: Ds.Channel) sqlite.DynamicStatement.PrepareError!void {
     const q =
         \\INSERT INTO channel (link, title, description)
         \\VALUES (?, ?, ?)
@@ -60,14 +62,14 @@ pub fn add_posts(self: *Sqlite, channel: Ds.Channel) !void {
         \\    description = excluded.description
         \\RETURNING rowid;
                 ;
-    var stmt = try self.db.prepare(q);
+    var stmt = self.db.prepare(q) catch unreachable;
     const channel_id = try stmt.one(u64, .{}, .{ channel.link, channel.title, channel.description })
         orelse unreachable;
     stmt.deinit();
 
     std.log.debug("channel row id: {}", .{ channel_id });
 
-    var savepoint = try self.db.savepoint("items");
+    var savepoint = self.db.savepoint("items") catch unreachable;
     defer savepoint.rollback();
 
     const q2 = 
@@ -79,7 +81,7 @@ pub fn add_posts(self: *Sqlite, channel: Ds.Channel) !void {
         \\      pubdate = excluded.pubdate,
         \\      description = excluded.description
         ;
-    var stmt2 = try self.db.prepare(q2);
+    var stmt2 = self.db.prepare(q2) catch unreachable;
     
     for (channel.item) |item| {
         const time_stamp: time.time_t = blk: {

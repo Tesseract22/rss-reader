@@ -6,12 +6,12 @@ const assert = std.debug.assert;
 const fatal = std.process.fatal;
 const Allocator = std.mem.Allocator;
 
-const XmlError = xml.Reader.ReadError || error { 
+pub const XmlError = xml.Reader.ReadError || error { 
     UnexpectedNode,
     UnexpectedElementName,
 };
 
-const XmlParserError = XmlError || error {
+pub const ParserError = XmlError || error {
     DuplicateField,
     UnsetField,
     OutOfMemory,
@@ -70,14 +70,14 @@ fn is_str_slice(comptime T: type) bool {
 /// []S, where is `S` is some struct that is valid
 ///
 /// Memory is allocated for copying strings and creating slices.
-pub fn parse_struct(comptime T: type, reader: *xml.Reader, maybe_start_el_name: ?[]const u8, str_alloc: Allocator) XmlParserError!T {
+pub fn parse_struct(comptime T: type, reader: *xml.Reader, maybe_start_el_name: ?[]const u8, str_alloc: Allocator) ParserError!T {
     if (maybe_start_el_name) |start_el_name| {
         try expect_element_start_name(reader, start_el_name);
     }
     return parse_struct_inner(T, reader, maybe_start_el_name, str_alloc);
 }
 
-fn parse_struct_inner(comptime T: type, reader: *xml.Reader, maybe_start_el_name: ?[]const u8, str_alloc: Allocator) XmlParserError!T {
+fn parse_struct_inner(comptime T: type, reader: *xml.Reader, maybe_start_el_name: ?[]const u8, str_alloc: Allocator) ParserError!T {
     const info = @typeInfo(T);
     if (info != .@"struct")
         @compileError("Expect T to be a struct, got " ++ @typeName(T));
@@ -98,7 +98,7 @@ fn parse_struct_inner(comptime T: type, reader: *xml.Reader, maybe_start_el_name
                     if (maybe_start_el_name) |start_el_name| {
                         if (!std.mem.eql(u8, reader.elementName(), start_el_name)) {
                             std.log.err("Unexpected Element End Tag: {s} {s}", .{reader.elementName(), start_el_name});
-                            return XmlParserError.UnexpectedElementName;   
+                            return ParserError.UnexpectedElementName;   
                         }
                     } else {
                         return XmlError.UnexpectedNode;
@@ -109,7 +109,7 @@ fn parse_struct_inner(comptime T: type, reader: *xml.Reader, maybe_start_el_name
                     } else if (is_str_slice(f.type)) {
                         if (!state.*)
                             @field(res, f.name) = f.defaultValue() orelse 
-                                return XmlParserError.UnsetField;
+                                return ParserError.UnsetField;
 
                     }
                 }
@@ -131,7 +131,7 @@ fn parse_struct_inner(comptime T: type, reader: *xml.Reader, maybe_start_el_name
                     break;
                 } else if (is_str_slice(f.type)) {
                     if (state.*)
-                        return XmlParserError.DuplicateField;
+                        return ParserError.DuplicateField;
                     state.* = true;
                     const text = try reader.readElementText();
                     @field(&res, f.name) = try str_alloc.dupeZ(u8, text);
