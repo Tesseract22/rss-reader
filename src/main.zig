@@ -185,6 +185,9 @@ const UI = struct {
 
     repeat_t: f32 = 0,
     inside_input_box: bool = false,
+
+    batch_rects: std.ArrayList([4]gl.BaseVertexData) = .empty,
+    batch_texts: std.ArrayList([4]gl.BaseVertexData) = .empty,
     
     // const titles: []const []const u8 = &.{ "Title A", "Title B" };
     pub const Scroll = struct {
@@ -306,6 +309,15 @@ const UI = struct {
 
     }
 
+    fn render_test(ctx: *UIContext) void {
+        ctx.clear(.from_u32(0x303030ff));
+        draw_rect(ctx, .{ -0.25, -0.25 }, .{ 0.25, 0.5 }, .white);
+        // ctx.draw_text(.{ -0.5, 0}, 1, "Hello World", .yellow);
+        draw_text(ctx, .{ -0.5, 0}, 1, "Hello World", .yellow);
+        
+        flush(ctx);
+    }
+
     fn render(ctx: *UIContext) void {
         const ui = ctx.user_data;
         ui.inside_input_box = false;
@@ -364,13 +376,13 @@ const UI = struct {
         
         var fps_buf: [64]u8 = undefined;
         const fps_text = std.fmt.bufPrint(&fps_buf, "frame time: {}ms", .{ dt * 1000 }) catch unreachable;
-        ctx.draw_text(.{ ctx.x_right()-0.15, ctx.y_top()-add_btn_side },  0.3, fps_text, .white);
+        draw_text(ctx, .{ ctx.x_right()-0.15, ctx.y_top()-add_btn_side },  0.3, fps_text, .white);
 
         //
         // LEFT PANEL
         //
         const left_box = Box { .botleft = .{ ctx.x_left(), ctx.y_bot() }, .size = .{ 0.3, filter_box.botleft[1]-(ctx.y_bot()) - 0.015 } };
-        ctx.begin_scissor_gl_coord(left_box.botleft, left_box.size);
+        begin_scissor(ctx, left_box);
         for (ui.channels, 1..) |channel, i| {
             const if32: f32 = @floatFromInt(i);
             const box = Box.from_botleft(
@@ -378,7 +390,7 @@ const UI = struct {
                 .{ 0.3, menu_h });
             const iu32: u32 = @intCast(i);
 
-            if (iu32 == ui.selected_channel) ctx.draw_rect(box.botleft, box.size, .{ .r = 0xff, .g = 0xff, .b = 0, .a = 0x3f });
+            if (iu32 == ui.selected_channel) draw_rect(ctx, box.botleft, box.size, .{ .r = 0xff, .g = 0xff, .b = 0, .a = 0x3f });
 
             if (button(
                     ctx,
@@ -388,7 +400,7 @@ const UI = struct {
                     .midleft)) {
 
                 if (ui.selected_channel == iu32) {
-                    ui.selected_channel = INVALID_INDEX;
+             ui.selected_channel = INVALID_INDEX;
                     ui.reset_display_post_to_default();
                 } else {
                     ui.selected_channel = iu32;
@@ -398,7 +410,7 @@ const UI = struct {
                 // ui.selected_title = channel_title;
             }
         }
-        ctx.end_scissor();
+        end_scissor(ctx);
 
 
         //
@@ -406,7 +418,7 @@ const UI = struct {
         //
         const expanded_mul = 3;
         const main_box = Box { .botleft = .{ ctx.x_left()+0.3, ctx.y_bot() }, .size = .{ ctx.screen_w()-left_box.size[0], left_box.size[1] } };
-        ctx.begin_scissor_gl_coord(main_box.botleft, main_box.size);
+        begin_scissor(ctx, main_box);
         // const titles_h = @as(f32, @floatFromInt(ui.posts.len)) * btn_h;
         const total_titles_h = (@as(f32, @floatFromInt(ui.displayed_posts.items.len)) + ui.expand_anim.x * expanded_mul) * menu_h;
 
@@ -459,7 +471,7 @@ const UI = struct {
             } 
 
         }
-        ctx.end_scissor();
+        end_scissor(ctx);
 
         scroll_box(ctx, main_box, &ui.main_scroll, total_titles_h);
         ctx.draw_rect_lines(main_box.botleft, main_box.size, 1, .yellow);
@@ -470,6 +482,7 @@ const UI = struct {
             _ = gl.c.RGFW_window_setMouseStandard(ctx.window, gl.c.RGFW_mouseNormal);
 
 
+        flush(ctx);
         // std.log.info("Mouse gl pos: {any} {any}", .{ctx.mouse_pos_gl, ctx.mouse_pos_screen});
         // std.log.info("Mouse scroll: {any}", .{ctx.mouse_scroll});
     }
@@ -483,6 +496,16 @@ const UI = struct {
         bg_color: RGBA = .transparent,
         border_color: ?RGBA = .from_u32(0xffffff30),
     };
+
+    pub fn begin_scissor(ctx: *UIContext, box: Box) void {
+        flush(ctx);
+        ctx.begin_scissor_gl_coord(box.botleft, box.size);
+    }
+
+    pub fn end_scissor(ctx: *UIContext) void {
+        flush(ctx);
+        ctx.end_scissor();
+    }
 
     pub const TextAlignment = enum {
         topleft,
@@ -504,11 +527,43 @@ const UI = struct {
         }
     }
 
+    fn draw_rect(ctx: *UIContext, botleft: Vec2, size: Vec2, rgba: RGBA) void {
+        const ui = ctx.user_data;
+        ui.batch_rects.append(ui.gpa, ctx.make_rect_vertex_data(botleft, size, rgba)) catch unreachable;
+    }
+
+    fn draw_text(ctx: *UIContext, pos: Vec2, size: f32, text: []const u8, rgba: RGBA) void {
+        const ui = ctx.user_data;
+        var it = ctx.make_code_point_vertex_data(pos, size, text, 1024*1024, rgba);
+        while (it.next()) |vertexes| {
+            ui.batch_texts.append(ui.gpa, vertexes) catch unreachable;
+        }
+
+    }
+
+    fn flush(ctx: *UIContext) void {
+        const ui = ctx.user_data;
+        ctx.draw_tex_batch(ui.batch_rects.items, ctx.white_tex, false, ctx.base_shader_pgm);
+        ctx.draw_tex_batch(ui.batch_texts.items, .{ .id = ctx.default_font.tex, .w = undefined, .h = undefined }, false, ctx.font_shader_pgm);
+
+        // ctx.draw_text(.{ -0.5, -0.1}, 1, "Hello World", .yellow);
+        // for (ui.batch_texts.items[1..]) |vertexes| {
+        //     // std.testing.expectEqualDeep(ui.batch_texts.items[i], vertexes) catch unreachable;
+        //     ctx.draw_tex_vertex_data(vertexes, .{ .id = ctx.default_font.tex, .w = undefined, .h = undefined }, false, ctx.font_shader_pgm);
+        // }
+
+        // std.log.debug("texts batch: {}", .{ui.batch_texts.items.len});
+
+        ui.batch_rects.clearRetainingCapacity();
+        ui.batch_texts.clearRetainingCapacity();
+        
+    }
+
     fn text_box_ex(ctx: *UIContext, opt: TextBoxExOptions) void {
         const box = opt.box;
-        ctx.draw_rect(box.botleft, box.size, opt.bg_color);
+        draw_rect(ctx, box.botleft, box.size, opt.bg_color);
         if (opt.border_color) |border_color| ctx.draw_rect_lines(box.botleft, box.size, 5, border_color);
-        ctx.draw_text(.{ 
+        draw_text(ctx, .{ 
             box.botleft[0] + opt.text_offset[0],
             box.botleft[1] + opt.text_offset[1] }, opt.font_size, opt.text, opt.text_color);
     }
@@ -559,12 +614,12 @@ const UI = struct {
 
     fn input_box(ctx: *UIContext, box: Box, input: *Input, hint_text: []const u8, a: Allocator) void {
         const font_size = 0.5;
-        ctx.draw_rect(box.botleft, box.size, .white); 
+        draw_rect(ctx, box.botleft, box.size, .white); 
         const text_offset = Vec2 { ctx.pixels(5), (box.size[1]-ctx.cal_font_h(font_size))/2 };
         if (input.content.items.len > 0)
-            ctx.draw_text(.{ box.botleft[0] + text_offset[0], box.botleft[1] + text_offset[1] }, font_size, input.content.items, .black)
+            draw_text(ctx, .{ box.botleft[0] + text_offset[0], box.botleft[1] + text_offset[1] }, font_size, input.content.items, .black)
         else
-            ctx.draw_text(.{ box.botleft[0] + text_offset[0], box.botleft[1] + text_offset[1] }, font_size, hint_text, .from_u32(0x7f7f7fff));
+            draw_text(ctx, .{ box.botleft[0] + text_offset[0], box.botleft[1] + text_offset[1] }, font_size, hint_text, .from_u32(0x7f7f7fff));
 
         const within = mouse_within_rect(ctx, box);
         ctx.user_data.inside_input_box = ctx.user_data.inside_input_box or within;
@@ -614,7 +669,7 @@ const UI = struct {
             const cursor_box = Box.from_centerleft(
                 .{ end_of_text, box.botleft[1] + box.size[1]/2 },
                 .{ ctx.pixels(3), box.size[1] * 0.9 });
-            ctx.draw_rect(cursor_box.botleft, cursor_box.size, .from_u32(0x7f7f7fff));
+            draw_rect(ctx, cursor_box.botleft, cursor_box.size, .from_u32(0x7f7f7fff));
         }
 
         if (input.dirty)
@@ -622,7 +677,6 @@ const UI = struct {
     } 
 
     fn scroll_box(ctx: *UIContext, box: Box, scroll: *Scroll, scroll_h: f32) void {
-        // const ui = ctx.user_data;
         const dt = ctx.get_delta_time();
         const scroll_bar_w = @max(0.02, ctx.pixels(20));
         const scroll_bar_h = (box.size[1] / scroll_h) * box.size[1];
@@ -632,9 +686,9 @@ const UI = struct {
         };
         if (scroll_h <= box.size[1]) return;
         // Scroll bar background
-        ctx.draw_rect(.{ box.x_right()-scroll_bar_w, box.botleft[1] }, .{ scroll_bar_w, box.size[1] }, .from_u32(0x7f7f7fdf));
+        draw_rect(ctx, .{ box.x_right()-scroll_bar_w, box.botleft[1] }, .{ scroll_bar_w, box.size[1] }, .from_u32(0x7f7f7fdf));
         // Scroll bar itself
-        ctx.draw_rect(
+        draw_rect(ctx, 
             scroll_bar.botleft,
             scroll_bar.size,
             .from_u32(0x3f3f3fff));
@@ -647,7 +701,7 @@ const UI = struct {
 
         if (scroll.clicked) {
             scroll.scroll += ctx.mouse_delta[1]/box.size[1]; 
-            ctx.draw_rect(scroll_bar.botleft, scroll_bar.size, .from_u32(0x00000030));
+            draw_rect(ctx, scroll_bar.botleft, scroll_bar.size, .from_u32(0x00000030));
             ctx.draw_rect_lines(
                 scroll_bar.botleft,
                 scroll_bar.size,
@@ -663,7 +717,7 @@ const UI = struct {
                 .from_u32(0xffffffdf),
             );
         }
-        // ctx.draw_text(.{0, 0}, 1, ctx.input_chars.items, .white);
+        // draw_text(ctx, .{0, 0}, 1, ctx.input_chars.items, .white);
 
         if (gl.c.RGFW_isKeyDown(gl.c.RGFW_up) == 1) scroll.scroll -= scroll_spd * dt / scroll_h;
         if (gl.c.RGFW_isKeyDown(gl.c.RGFW_down) == 1) scroll.scroll += scroll_spd * dt / scroll_h;
