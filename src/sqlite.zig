@@ -67,7 +67,7 @@ pub fn add_posts(self: *Sqlite, channel: Ds.Channel) sqlite.DynamicStatement.Pre
         orelse unreachable;
     stmt.deinit();
 
-    std.log.debug("channel row id: {}", .{ channel_id });
+    // std.log.debug("channel row id: {}", .{ channel_id });
 
     var savepoint = self.db.savepoint("items") catch unreachable;
     defer savepoint.rollback();
@@ -89,8 +89,8 @@ pub fn add_posts(self: *Sqlite, channel: Ds.Channel) sqlite.DynamicStatement.Pre
                 std.log.err("Cannot strptime {s}", .{ item.pubDate});
                 break :blk 0;
             };
-            std.log.debug("year: {}, month: {}, day: {}, wday: {}", .{ 
-                tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, tm.tm_wday });
+            // std.log.debug("year: {}, month: {}, day: {}, wday: {}", .{ 
+            //     tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, tm.tm_wday });
             // std.log.info("converted from: {s}", .{ item.pubDate });
             break :blk time.mktime(&tm);
         };

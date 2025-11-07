@@ -166,8 +166,10 @@ const UI = struct {
                               
     gpa: Allocator,
 
+
     main_scroll: Scroll = .{ .scroll = 0, .clicked = false },
-    input: Input = .{},
+    url_input: Input = .{},
+    filter_input: Input = .{},
 
     db: *Sqlite,
 
@@ -182,6 +184,7 @@ const UI = struct {
     expand_anim: Anim = .{},
 
     repeat_t: f32 = 0,
+    inside_input_box: bool = false,
     
     // const titles: []const []const u8 = &.{ "Title A", "Title B" };
     pub const Scroll = struct {
@@ -299,12 +302,13 @@ const UI = struct {
 
     fn filter_and_update(ui: *UI) void {
         ui.selected_post = INVALID_INDEX;
-        ui.filter_post(.{ .channel = ui.selected_channel, .name = ui.input.content.items });
+        ui.filter_post(.{ .channel = ui.selected_channel, .name = ui.filter_input.content.items });
 
     }
 
     fn render(ctx: *UIContext) void {
         const ui = ctx.user_data;
+        ui.inside_input_box = false;
         const dt = ctx.get_delta_time();
 
         ctx.clear(.from_u32(0x303030ff));
@@ -322,7 +326,7 @@ const UI = struct {
                 .{ (add_box.size[0]-plus_size[0])/2-ctx.pixels(1), (add_box.size[1]-plus_size[1])/2 })) {
             db_mutex.lock();
             defer db_mutex.unlock();
-            const url = ui.input.content.items;
+            const url = ui.url_input.content.items;
 
             db_fetch_complete.store(false, .release);
             db_rss_url = url;
@@ -335,10 +339,15 @@ const UI = struct {
         const url_box = Box.from_centerleft(.{ add_box.x_right() + 0.01, top_menu_y_center }, .{ 1, add_btn_side*0.75 });
         input_box(ctx,
             url_box,
-            &ui.input, "Enter url of rss here...", ui.gpa);
+            &ui.url_input, "Enter url of rss here...", ui.gpa);
+        const filter_box = Box.from_centerleft(.{ url_box.botleft[0], top_menu_y_center-add_btn_side }, .{ 0.5, add_btn_side*0.75 });
+        input_box(ctx,
+            filter_box,
+            &ui.filter_input, "Filter by title...", ui.gpa);
+
         // std.log.debug("dirty: {} {} ", .{ui.input.dirty, ui.input.dirty_t});
-        if (ui.input.is_dirty(input_filter_delay)) {
-            ui.input.unset_dirty();
+        if (ui.filter_input.is_dirty(input_filter_delay)) {
+            ui.filter_input.unset_dirty();
             ui.filter_and_update();
         }
 
@@ -352,11 +361,15 @@ const UI = struct {
         err_text_anim.update(dt/10);
         text_box(ctx, .from_centerleft(.{ url_box.x_right() + 0.01, top_menu_y_center }, url_box.size), 0.5, err_text, 
             .{ .r = 0xff, .g = 0xff, .b = 0xff, .a = @intFromFloat(255.0 * err_text_anim.x ) }, .midleft);
+        
+        var fps_buf: [64]u8 = undefined;
+        const fps_text = std.fmt.bufPrint(&fps_buf, "frame time: {}ms", .{ dt * 1000 }) catch unreachable;
+        ctx.draw_text(.{ ctx.x_right()-0.15, ctx.y_top()-add_btn_side },  0.3, fps_text, .white);
 
         //
         // LEFT PANEL
         //
-        const left_box = Box { .botleft = .{ ctx.x_left(), ctx.y_bot() }, .size = .{ 0.3, add_box.botleft[1]-(ctx.y_bot()) - 0.015 } };
+        const left_box = Box { .botleft = .{ ctx.x_left(), ctx.y_bot() }, .size = .{ 0.3, filter_box.botleft[1]-(ctx.y_bot()) - 0.015 } };
         ctx.begin_scissor_gl_coord(left_box.botleft, left_box.size);
         for (ui.channels, 1..) |channel, i| {
             const if32: f32 = @floatFromInt(i);
@@ -387,20 +400,18 @@ const UI = struct {
         }
         ctx.end_scissor();
 
-        
 
-        // ctx.draw_text(.{ ctx.x_left()+add_btn_side+0.05, ctx.y_top()-(add_btn_side+ctx.cal_font_h(0.5))/2-0.015}, 0.5, ui.input.items, .white);
-        // ctx.draw_rect(.{ add_btn_pos[0]+(add_btn_size[0]-plus_size[0])/2, add_btn_pos[1]+(add_btn_size[1]-plus_size[1])/2 }, plus_size,.white);
-
-
-        // ctx.draw_rect_lines(.{ ctx.x_left(), ctx.y_bot() }, .{ 0.3, ctx.screen_h() }, 5, .from_u32(0xffffff30));
-
+        //
+        // MAIN BOX
+        //
+        const expanded_mul = 3;
         const main_box = Box { .botleft = .{ ctx.x_left()+0.3, ctx.y_bot() }, .size = .{ ctx.screen_w()-left_box.size[0], left_box.size[1] } };
         ctx.begin_scissor_gl_coord(main_box.botleft, main_box.size);
         // const titles_h = @as(f32, @floatFromInt(ui.posts.len)) * btn_h;
-        const total_titles_h = (@as(f32, @floatFromInt(ui.displayed_posts.items.len)) + ui.expand_anim.x * 3) * menu_h;
+        const total_titles_h = (@as(f32, @floatFromInt(ui.displayed_posts.items.len)) + ui.expand_anim.x * expanded_mul) * menu_h;
 
         var titles_h: f32 = 0;
+        const mouse_in_scroll = mouse_within_rect(ctx, main_box);
         for (ui.displayed_posts.items, 0..) |post_idx, i| {
             const post = ui.posts[post_idx];
             // const if32: f32 = @floatFromInt(i+1);
@@ -413,8 +424,7 @@ const UI = struct {
                         .{  ctx.screen_w()-0.3, menu_h }),
                     0.5,
                     post.title,
-                    .midleft)) {
-
+                    .midleft) and mouse_in_scroll) {
                 if (ui.selected_post != @as(u32, @intCast(i))) {
                     ui.selected_post = @intCast(i);
                     ui.expand_anim.x = 0;
@@ -430,15 +440,15 @@ const UI = struct {
                 // ui.expand_anim.x += (ui.expand_anim.target - ui.expand_anim.x) * (1 - @exp(-dt * Anim.SMOOTH_SPD));
                 ui.expand_anim.update(dt);
                 // std.log.info("anim: {}, target: {}({})", .{ui.expand_anim.x, ui.expand_anim.target, menu_h * 3});
-                titles_h += ui.expand_anim.x*menu_h*3;
+                titles_h += ui.expand_anim.x*menu_h*expanded_mul;
                 if (button(
                     ctx,
                     .from_botleft(
                         .{ main_box.botleft[0], main_box.top(0)-titles_h + ui.main_scroll.scroll*total_titles_h }, 
-                        .{  ctx.screen_w()-0.3, ui.expand_anim.x*menu_h*3 }),
+                        .{  ctx.screen_w()-0.3, ui.expand_anim.x*menu_h*expanded_mul }),
                     0.5,
                     if (ui.expand_anim.x > 0.5) post.link else "",
-                    .topleft)) {
+                    .topleft) and mouse_in_scroll) {
                     ctx.set_clipboard(post.link);
 
                     set_annoucement("Url copied to cliboard.", .{}, 5);
@@ -453,6 +463,13 @@ const UI = struct {
 
         scroll_box(ctx, main_box, &ui.main_scroll, total_titles_h);
         ctx.draw_rect_lines(main_box.botleft, main_box.size, 1, .yellow);
+
+        if (ui.inside_input_box)
+            _ = gl.c.RGFW_window_setMouseStandard(ctx.window, gl.c.RGFW_mouseIbeam)
+        else
+            _ = gl.c.RGFW_window_setMouseStandard(ctx.window, gl.c.RGFW_mouseNormal);
+
+
         // std.log.info("Mouse gl pos: {any} {any}", .{ctx.mouse_pos_gl, ctx.mouse_pos_screen});
         // std.log.info("Mouse scroll: {any}", .{ctx.mouse_scroll});
     }
@@ -550,12 +567,9 @@ const UI = struct {
             ctx.draw_text(.{ box.botleft[0] + text_offset[0], box.botleft[1] + text_offset[1] }, font_size, hint_text, .from_u32(0x7f7f7fff));
 
         const within = mouse_within_rect(ctx, box);
+        ctx.user_data.inside_input_box = ctx.user_data.inside_input_box or within;
 
-        if (within)
-            _ = gl.c.RGFW_window_setMouseStandard(ctx.window, gl.c.RGFW_mouseIbeam)
-        else
-            _ = gl.c.RGFW_window_setMouseStandard(ctx.window, gl.c.RGFW_mouseNormal);
-
+        
         if (ctx.mouse_left)
             input.focused = within;
 
@@ -678,6 +692,14 @@ const UI = struct {
         }
         return ct;
     }
+
+    // fn begin_scroll(ctx: *UIContext, box: Box, scroll: *Scroll, scroll_h: f32) void {
+
+    // }
+
+    // fn end_srcoll(ctx: *UIContext) void {
+
+    // }
 
     // fn highlight_on_hover(ctx: *UIContext, box: Box) void {
     //     if (mouse_within_rect)
