@@ -65,7 +65,10 @@ pub fn build(b: *std.Build) void {
         .name = "rss_reader",
         .root_module = rss_reader_mod,
     });
-
+    
+    const install_rss_reader = b.addInstallArtifact(rss_reader, .{});
+    const rss_reader_step = b.step("rss-reader", "");
+    rss_reader_step.dependOn(&install_rss_reader.step);
     b.installArtifact(rss_reader);
 
 
