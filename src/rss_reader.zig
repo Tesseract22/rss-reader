@@ -31,16 +31,24 @@ const Renderer = struct {
         _ = self;
         ctx.clear(.from_u32(0x303030ff));
         {
-            UI.push_layout(.X);
-            if (UI.text_btn(std.fmt.allocPrint(UI.curr_arena, "counter {}", .{ counter }) catch unreachable, 0.5)) {
-                counter += 1;
+            _ = UI.push_layout(.Y);
+            UI.text("Header", .{ .w_strategy = .span_screen });
+            _ = UI.push_layout(.X);
+            {
+                _ = UI.push_layout(.Y);
+                for (channels) |channel| {
+                    _ = UI.text_btn(channel.title, .{ .font_scale = 0.5, .w_strategy = .{ .fixed_in_pixels = 300 } });
+                }
+                UI.pop_layout();
             }
-            _ = UI.text_btn("AA", 0.5);
-            _ = UI.text_btn("BB", 0.5);
 
-            UI.push_layout(.Y);
-            _ = UI.text_btn("CC", 0.5);
-            _ = UI.text_btn("DD", 0.5);
+            {
+                _ = UI.push_scroll_layout("post_content", .span_screen);
+                for (posts) |post|
+                    _ = UI.text_btn(post.title, . { .font_scale = 0.5, .w_strategy = .span_screen });
+                UI.pop_layout();
+            }
+
             UI.pop_layout();
 
             UI.pop_layout();
@@ -67,12 +75,40 @@ const Renderer = struct {
         }
 
 
-        if (node.flags.contains(.Layout)) {
+        if (node.flags.contains(.scissor)) {
+            flush();
+            ctx.begin_scissor_gl_coord(box.botleft, box.size); // TODO: handle stack of scissors
+        }
+        
+        if (node.flags.contains(.layout)) {
             for (node.children.items) |child| {
                 render_ui_impl(child);
             }
         } else {
-            draw_text(.{ box.botleft[0]+ctx.pixels(node.padding[0]), box.botleft[1]+ctx.pixels(node.padding[1]) }, node.font_scale, node.text, .white);
+            draw_text(.{ box.botleft[0]+ctx.pixels(node.padding[0]), box.botleft[1]+ctx.pixels(node.padding[1]) }, node.font_scale, node.text_content, .white);
+        }
+
+        if (node.flags.contains(.y_scroll)) {
+            const scroll_bar_w = @max(0.02, ctx.pixels(20));
+            const scroll_h = node.children_bounding_size[1];
+            const scroll_bar_h = (box.size[1] / scroll_h) * box.size[1];
+            // Scroll bar background
+            draw_rect(.{ box.x_right()-scroll_bar_w, box.botleft[1] }, .{ scroll_bar_w, box.size[1] }, .from_u32(0x7f7f7fdf));
+            const scroll_bar = Box {
+                .botleft = .{ box.x_right()-scroll_bar_w, box.y_top() - node.scroll_offset*box.size[1]-scroll_bar_h },
+                .size =.{ scroll_bar_w, scroll_bar_h },
+            };
+
+            draw_rect(
+                scroll_bar.botleft,
+                scroll_bar.size,
+                .from_u32(0x3f3f3fff));
+
+        }
+
+        if (node.flags.contains(.scissor)) {
+            flush();
+            ctx.end_scissor();
         }
         draw_rect_lines(box.botleft, box.size, 2.5, node.border_color);
     }
@@ -178,6 +214,13 @@ const Box = struct {
 };
 
 pub const UI = struct {
+    pub const SizeStrategy = union(enum) {
+        fit_text,
+        fit_children,
+        fixed_in_pixels: f32,
+        span_screen,
+    };
+
     pub var key_hash: [2]std.StringHashMap(*UI) = undefined; // @init_on_main
     pub var curr_hash: *std.StringHashMap(*UI) = undefined; // @init_on_main
     pub var prev_hash: *std.StringHashMap(*UI) = undefined; // @init_on_main
@@ -191,27 +234,43 @@ pub const UI = struct {
     flags: std.EnumSet(Flag) = std.EnumSet(Flag).initEmpty(),
 
     children: std.ArrayList(*UI) = .empty,
-    text: []const u8 = "",
+    text_content: []const u8 = "",
     font_scale: f32 = 1,
     bg_color: RGBA = .transparent,
     border_color: RGBA = .from_u32(0x7f7f7fff),
     padding: Vec2 = .{ 10, 10 },
+    w_strategy: SizeStrategy = .fit_text,
+    h_strategy: SizeStrategy = .fit_text,
 
     // resolve time fiels
+    scroll_offset: f32 = 0,
+
     layout_offset: Vec2 = .{ 0, 0 },
     layout_axis: Axis = .X,
+    children_bounding_size: Vec2 = .{ 0, 0 },
     resolved_size: Vec2 = .{ 0, 0 },
     resolved_origin: Vec2 = .{ 0, 0 }, // for now, the origin of a box is its topleft corner
 
     mouse_state: std.EnumSet(MouseState) = .initEmpty(),
-    
+
+    const UIOptions = struct {
+        font_scale: f32 = 1,
+        bg_color: RGBA = .transparent,
+        border_color: RGBA = .from_u32(0x7f7f7fff),
+        padding: Vec2 = .{ 10, 10 },
+        w_strategy: SizeStrategy = .fit_text,
+        h_strategy: SizeStrategy = .fit_text,
+    };
+
     pub const Axis = enum(u8) {
         X = 0,
         Y = 1,
     };
 
     pub const Flag = enum {
-        Layout,
+        layout,
+        y_scroll,
+        scissor,
     };
 
     pub const MouseState = enum {
@@ -231,17 +290,34 @@ pub const UI = struct {
         return within_rect(ctx.mouse_pos_gl, box);
     }
 
-    pub fn text_btn(text: []const u8, font_scale: f32) bool {
+    fn set_opts(ui: *UI, opts: UIOptions) void {
+        ui.font_scale = opts.font_scale;
+        ui.bg_color = opts.bg_color;
+        ui.border_color = opts.border_color;
+        ui.padding = opts.padding;
+        ui.w_strategy = opts.w_strategy;
+        ui.h_strategy = opts.h_strategy;
+
+    }
+
+    pub fn text(content: []const u8, opts: UIOptions) void {
+        const ui = new_default();     
+        ui.text_content = content;
+        set_opts(ui, opts);
+        ui.add_to_layout();
+    }
+
+    // better hashing strategies
+    pub fn text_btn(content: []const u8, opts: UIOptions) bool {
         const ui = new_default();     
 
-        ui.text = text;
-        ui.font_scale = font_scale;
-
+        ui.text_content = content;
+        set_opts(ui, opts);
         ui.add_to_layout();
 
-        curr_hash.putNoClobber(text, ui) catch unreachable;
+        curr_hash.putNoClobber(content, ui) catch unreachable;
 
-        const prev_ui = prev_hash.get(text) orelse return false;
+        const prev_ui = prev_hash.get(content) orelse return false;
         
         const hover = mouse_within_rect(.from_topleft(prev_ui.resolved_origin, prev_ui.resolved_size));
         ui.mouse_state.setPresent(.Hover, hover);
@@ -268,10 +344,13 @@ pub const UI = struct {
     pub var layouts_stack: std.ArrayList(*UI) = .empty;
     pub var root_layout: *UI = undefined; // @init_on_main
 
-    pub fn push_layout(axis: Axis) void {
+    pub fn push_layout(axis: Axis) *UI {
         const new_layout = new_default();
-        new_layout.flags.setPresent(.Layout, true);
+        new_layout.flags.setPresent(.layout, true);
         new_layout.layout_axis = axis;
+        new_layout.w_strategy = .fit_children;
+        new_layout.h_strategy = .fit_children;
+        new_layout.padding = .{ 0, 0 };
         // new_layout.border_color = .transparent;
 
         if (layouts_stack.items.len == 0) {
@@ -280,6 +359,33 @@ pub const UI = struct {
             new_layout.add_to_layout();
         }
         layouts_stack.append(gpa, new_layout) catch @panic("OOM");
+        return new_layout;
+    }
+
+    pub fn push_scroll_layout(str_hash: []const u8, h_strategy: SizeStrategy) *UI {
+        const dt = ctx.get_delta_time();
+        const scroll_spd = 1;
+        const new_layout = push_layout(.Y);
+        new_layout.flags.setPresent(.y_scroll, true);
+        new_layout.flags.setPresent(.scissor, true);
+        new_layout.h_strategy = h_strategy;
+
+        curr_hash.putNoClobber(str_hash, new_layout) catch unreachable;
+
+        if (prev_hash.get(str_hash)) |prev_layout| {
+            new_layout.scroll_offset = prev_layout.scroll_offset;
+            new_layout.children_bounding_size = prev_layout.children_bounding_size;
+            new_layout.resolved_size = prev_layout.resolved_size;
+
+            const scroll_h = new_layout.children_bounding_size[1];
+            const display_h = new_layout.resolved_size[1];
+            if (scroll_h > display_h) {
+                new_layout.scroll_offset -= ctx.mouse_scroll[1] * dt * 30 * scroll_spd / scroll_h;
+                new_layout.scroll_offset = std.math.clamp(new_layout.scroll_offset, 0, (scroll_h-display_h)/scroll_h);
+            }
+        }
+        
+        return new_layout;
     }
 
     pub fn pop_layout() void {
@@ -288,13 +394,13 @@ pub const UI = struct {
 
     fn get_curr_layout() *UI {
         const layout = layouts_stack.getLast();
-        assert(layout.flags.contains(.Layout));
+        assert(layout.flags.contains(.layout));
 
         return layout;
     }
 
     fn get_root_layout() *UI {
-        assert(root_layout.flags.contains(.Layout));
+        assert(root_layout.flags.contains(.layout));
         return root_layout;
     }
 
@@ -322,23 +428,22 @@ pub const UI = struct {
     // After this function, both the size and origin are resolved.
     fn resolve_layout_impl(maybe_parent: ?*const UI, node: *UI) void {
         if (maybe_parent) |parent| {
-            assert(parent.flags.contains(.Layout));
+            assert(parent.flags.contains(.layout));
             node.resolved_origin[0] = parent.resolved_origin[0] + parent.layout_offset[0];
-            node.resolved_origin[1] = parent.resolved_origin[1] + parent.layout_offset[1];
+            node.resolved_origin[1] = parent.resolved_origin[1] + parent.layout_offset[1] + parent.scroll_offset * parent.children_bounding_size[1];
         } else {
             // topleft corner of the screen
             node.resolved_origin[0] = ctx.x_left();
             node.resolved_origin[1] = ctx.y_top();
         }
 
-        if (node.flags.contains(.Layout)) {
+        var largest_child = Vec2 { 0, 0 };  
+        if (node.flags.contains(.layout)) {
             node.layout_offset[0] += ctx.pixels(node.padding[0]);
             node.layout_offset[1] -= ctx.pixels(node.padding[1]);
             for (node.children.items) |child| {
                 // before recurring into this function, make sure the origin of `node` is resolved
                 resolve_layout_impl(node, child);
-                node.resolved_size[0] = @max(node.resolved_size[0], node.layout_offset[0] + child.resolved_size[0]);
-                node.resolved_size[1] = @max(node.resolved_size[1], @abs(node.layout_offset[1] - child.resolved_size[1]));
 
                 switch (node.layout_axis) {
                     .X => 
@@ -346,19 +451,40 @@ pub const UI = struct {
                     .Y => 
                         node.layout_offset[1] -= child.resolved_size[1],
                 }
+                for (0..2) |i|
+                    largest_child[i] = @max(largest_child[i], child.resolved_size[i]);
             }
-            node.resolved_size[0] += ctx.pixels(node.padding[0]);
-            node.resolved_size[1] += ctx.pixels(node.padding[1]);
+        }
+        node.children_bounding_size[0] = @max(largest_child[0], ctx.pixels(node.padding[0]) + @abs(node.layout_offset[0]));
+        node.children_bounding_size[1] = @max(largest_child[1], ctx.pixels(node.padding[1]) + @abs(node.layout_offset[1]));
 
-        } else if (node.text.len > 0) {
-            node.resolved_size[0] = 2*ctx.pixels(node.padding[0]) + ctx.text_width(node.font_scale, node.text);
-            node.resolved_size[1] = 2*ctx.pixels(node.padding[1]) + ctx.cal_font_h(node.font_scale);
+        switch (node.w_strategy) {
+            .fit_children => {
+                node.resolved_size[0] = node.children_bounding_size[0];
+            },
+            .fit_text => {
+                node.resolved_size[0] = 2*ctx.pixels(node.padding[0]) + ctx.text_width(node.font_scale, node.text_content);
+            },
+            .fixed_in_pixels => |p| node.resolved_size[0] = ctx.pixels(2*node.padding[0] + p),
+            .span_screen => node.resolved_size[0] = ctx.x_right() - node.resolved_origin[0],
         }
 
+        switch (node.h_strategy) {
+            .fit_children => {
+                node.resolved_size[1] = node.children_bounding_size[1];
+            },
+            .fit_text => {
+                node.resolved_size[1] = 2*ctx.pixels(node.padding[1]) + ctx.cal_font_h(node.font_scale);
+            },
+            .fixed_in_pixels => |p| node.resolved_size[1] = ctx.pixels(2*node.padding[1] + p),
+            .span_screen => node.resolved_size[1] = node.resolved_origin[1] - ctx.y_bot(),
+        }
     }
 };
 
-
+var rss_db: Sqlite = undefined; // @init_on_main
+var channels: []Sqlite.ChannelWithId = undefined; // @init_on_main
+var posts: []Sqlite.ItemWithChannel = undefined; // @init_on_main
 
 pub fn main() !void {
     var gpa_state: std.heap.GeneralPurposeAllocator(.{}) = .{};
@@ -375,6 +501,13 @@ pub fn main() !void {
     UI.prev_arena_state = &UI.ui_arena_state[1];
     UI.curr_arena = UI.ui_arena_state[0].allocator();
     UI.prev_arena = UI.ui_arena_state[1].allocator();
+
+    std.log.debug("init database.", .{});
+    rss_db = try Sqlite.init("feed.db");
+    defer rss_db.deinit();
+
+    channels = try rss_db.get_channels_all(gpa);
+    posts = try rss_db.get_posts_all(gpa);
 
     defer { 
         UI.key_hash[0].deinit(); UI.key_hash[1].deinit(); 
