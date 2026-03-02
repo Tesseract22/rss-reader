@@ -15,6 +15,22 @@ const c = gl.c;
 
 const RGBA = gl.RGBA;
 
+pub fn v2add(a: Vec2, b: Vec2) Vec2 {
+    return .{ a[0] + b[0], a[1] + b[1] };
+}
+
+pub fn v2sub(a: Vec2, b: Vec2) Vec2 {
+    return .{ a[0] - b[0], a[1] - b[1] };
+}
+
+pub fn v2scal(a: Vec2, b: f32) Vec2 {
+    return .{ a[0] * b , a[1] * b };
+}
+
+pub fn v2pixels(a: Vec2) Vec2 {
+    return .{ ctx.pixels(a[0]), ctx.pixels(a[1]) };
+}
+
 const Renderer = struct {
     pub var batches: std.ArrayList([4]gl.BaseVertexData) = .empty;
     pub var batches_state: std.ArrayList(struct { BatchState, u64 }) = .empty;
@@ -37,15 +53,21 @@ const Renderer = struct {
             {
                 _ = UI.push_layout(.Y);
                 for (channels) |channel| {
-                    _ = UI.text_btn(channel.title, .{ .font_scale = 0.5, .w_strategy = .{ .fixed_in_pixels = 300 } });
+                    _ = UI.text_btn(channel.title, .{ .margin = .{ 10, 10 }, .font_scale = 0.5, .w_strategy = .{ .fixed_in_pixels = 300 } });
                 }
                 UI.pop_layout();
             }
 
             {
-                _ = UI.push_scroll_layout("post_content", .span_screen);
+                const post_layout = UI.push_scroll_layout("post_content", .span_screen);
+                post_layout.bg_color = .from_u32(0x061e29ff);
                 for (posts) |post|
-                    _ = UI.text_btn(post.title, . { .font_scale = 0.5, .w_strategy = .span_screen });
+                    _ = UI.text_btn(post.title, 
+                        .{ 
+                            .margin = .{ 10, 10 },
+                            .border_color = .white, .bg_color = .from_u32(0x303030ff),
+                            .font_scale = 0.5, .w_strategy = .span_screen
+                        });
                 UI.pop_layout();
             }
 
@@ -65,14 +87,28 @@ const Renderer = struct {
         render_ui_impl(UI.get_root_layout());
     }
 
-    fn render_ui_impl(node: *UI) void {
-        const box = Box.from_topleft(node.resolved_origin, node.resolved_size);
-        draw_rect(box.botleft, node.resolved_size, node.bg_color);
-        if (node.mouse_state.contains(.Down)) {
-            draw_rect(box.botleft, node.resolved_size, .from_u32(0x00000030));
-        } else if (node.mouse_state.contains(.Hover)) {
-            draw_rect(box.botleft, node.resolved_size, .from_u32(0xffffff30));
+    fn draw_btn_overlay(mouse_state: std.EnumSet(UI.MouseState), box: Box) void {
+        if (mouse_state.contains(.Down)) {
+            draw_rect(box.botleft, box.size, .from_u32(0x00000030));
+        } else if (mouse_state.contains(.Hover)) {
+            draw_rect(box.botleft, box.size, .from_u32(0xffffff30));
         }
+       if (mouse_state.contains(.Hover) or mouse_state.contains(.Down)) 
+            draw_rect_lines(box.botleft, box.size, 2.5, .white);
+    }
+
+    pub fn get_box(node: *UI) Box {
+        const box_with_margin = Box.from_topleft(node.resolved_origin, node.resolved_size);
+        const margin_pixels = v2pixels(node.margin);
+        const box = Box { 
+            .botleft = v2add(box_with_margin.botleft, margin_pixels),
+            .size = v2sub(box_with_margin.size, v2scal(margin_pixels, 2)) };
+        return box;
+    }
+
+    fn render_ui_impl(node: *UI) void {
+        const box = get_box(node);
+        draw_rect(box.botleft, box.size, node.bg_color);
 
 
         if (node.flags.contains(.scissor)) {
@@ -85,24 +121,23 @@ const Renderer = struct {
                 render_ui_impl(child);
             }
         } else {
-            draw_text(.{ box.botleft[0]+ctx.pixels(node.padding[0]), box.botleft[1]+ctx.pixels(node.padding[1]) }, node.font_scale, node.text_content, .white);
+            draw_text(v2add(box.botleft, v2pixels(node.padding)), node.font_scale, node.text_content, .white);
         }
 
         if (node.flags.contains(.y_scroll)) {
-            const scroll_bar_w = @max(0.02, ctx.pixels(20));
-            const scroll_h = node.children_bounding_size[1];
-            const scroll_bar_h = (box.size[1] / scroll_h) * box.size[1];
+            // const scroll_h = node.children_bounding_size[1];
+            // const scroll_bar_h = node.get_scroll_bar_h();
             // Scroll bar background
-            draw_rect(.{ box.x_right()-scroll_bar_w, box.botleft[1] }, .{ scroll_bar_w, box.size[1] }, .from_u32(0x7f7f7fdf));
-            const scroll_bar = Box {
-                .botleft = .{ box.x_right()-scroll_bar_w, box.y_top() - node.scroll_offset*box.size[1]-scroll_bar_h },
-                .size =.{ scroll_bar_w, scroll_bar_h },
-            };
+            draw_rect(.{ box.x_right()-UI.get_scroll_bar_w(), box.botleft[1] }, .{ UI.get_scroll_bar_w(), box.size[1] }, .from_u32(0xefefefff));
+            const scroll_bar = node.get_scroll_bar_box(box);
 
+            // Scroll bar
             draw_rect(
                 scroll_bar.botleft,
                 scroll_bar.size,
                 .from_u32(0x3f3f3fff));
+            draw_rect_lines(scroll_bar.botleft, scroll_bar.size, 2.5, node.border_color);
+            draw_btn_overlay(node.mouse_state, scroll_bar);
 
         }
 
@@ -111,6 +146,8 @@ const Renderer = struct {
             ctx.end_scissor();
         }
         draw_rect_lines(box.botleft, box.size, 2.5, node.border_color);
+        if (node.flags.contains(.button)) draw_btn_overlay(node.mouse_state, box);
+ 
     }
 
     fn append_state(ct: usize) void {
@@ -239,6 +276,7 @@ pub const UI = struct {
     bg_color: RGBA = .transparent,
     border_color: RGBA = .from_u32(0x7f7f7fff),
     padding: Vec2 = .{ 10, 10 },
+    margin: Vec2 = .{ 0, 0 },
     w_strategy: SizeStrategy = .fit_text,
     h_strategy: SizeStrategy = .fit_text,
 
@@ -258,6 +296,7 @@ pub const UI = struct {
         bg_color: RGBA = .transparent,
         border_color: RGBA = .from_u32(0x7f7f7fff),
         padding: Vec2 = .{ 10, 10 },
+        margin: Vec2 = .{ 0, 0 },
         w_strategy: SizeStrategy = .fit_text,
         h_strategy: SizeStrategy = .fit_text,
     };
@@ -271,6 +310,7 @@ pub const UI = struct {
         layout,
         y_scroll,
         scissor,
+        button,
     };
 
     pub const MouseState = enum {
@@ -278,6 +318,7 @@ pub const UI = struct {
         Down,
         Clicked,
     };
+
 
     fn within_rect(p: Vec2, box: Box) bool {
         const botleft = box.botleft;
@@ -295,6 +336,7 @@ pub const UI = struct {
         ui.bg_color = opts.bg_color;
         ui.border_color = opts.border_color;
         ui.padding = opts.padding;
+        ui.margin = opts.margin;
         ui.w_strategy = opts.w_strategy;
         ui.h_strategy = opts.h_strategy;
 
@@ -307,11 +349,21 @@ pub const UI = struct {
         ui.add_to_layout();
     }
 
+    pub fn handle_btn(box: Box) std.EnumSet(MouseState) {
+        var mouse_state = std.EnumSet(MouseState).initEmpty();
+        const hover = mouse_within_rect(box);
+        mouse_state.setPresent(.Hover, hover);
+        mouse_state.setPresent(.Clicked, hover and ctx.mouse_left);
+        mouse_state.setPresent(.Down, hover and c.RGFW_isMouseDown(c.RGFW_mouseLeft) == 1);
+        return mouse_state;
+    }
+
     // better hashing strategies
     pub fn text_btn(content: []const u8, opts: UIOptions) bool {
         const ui = new_default();     
 
         ui.text_content = content;
+        ui.flags.setPresent(.button, true);
         set_opts(ui, opts);
         ui.add_to_layout();
 
@@ -319,11 +371,7 @@ pub const UI = struct {
 
         const prev_ui = prev_hash.get(content) orelse return false;
         
-        const hover = mouse_within_rect(.from_topleft(prev_ui.resolved_origin, prev_ui.resolved_size));
-        ui.mouse_state.setPresent(.Hover, hover);
-        ui.mouse_state.setPresent(.Clicked, hover and ctx.mouse_left);
-        ui.mouse_state.setPresent(.Down, hover and c.RGFW_isMouseDown(c.RGFW_mouseLeft) == 1);
-
+        ui.mouse_state = handle_btn(.from_topleft(prev_ui.resolved_origin, prev_ui.resolved_size));
         return ui.mouse_state.contains(.Clicked);
     }
 
@@ -365,27 +413,67 @@ pub const UI = struct {
     pub fn push_scroll_layout(str_hash: []const u8, h_strategy: SizeStrategy) *UI {
         const dt = ctx.get_delta_time();
         const scroll_spd = 1;
-        const new_layout = push_layout(.Y);
-        new_layout.flags.setPresent(.y_scroll, true);
-        new_layout.flags.setPresent(.scissor, true);
-        new_layout.h_strategy = h_strategy;
+        const layout = push_layout(.Y);
+        layout.flags.setPresent(.y_scroll, true);
+        layout.flags.setPresent(.scissor, true);
+        layout.h_strategy = h_strategy;
 
-        curr_hash.putNoClobber(str_hash, new_layout) catch unreachable;
+        curr_hash.putNoClobber(str_hash, layout) catch unreachable;
 
         if (prev_hash.get(str_hash)) |prev_layout| {
-            new_layout.scroll_offset = prev_layout.scroll_offset;
-            new_layout.children_bounding_size = prev_layout.children_bounding_size;
-            new_layout.resolved_size = prev_layout.resolved_size;
+            layout.scroll_offset = prev_layout.scroll_offset;
+            layout.children_bounding_size = prev_layout.children_bounding_size;
+            layout.resolved_origin = prev_layout.resolved_origin;
+            layout.resolved_size = prev_layout.resolved_size;
 
-            const scroll_h = new_layout.children_bounding_size[1];
-            const display_h = new_layout.resolved_size[1];
+            const scroll_h = layout.children_bounding_size[1];
+            const display_h = prev_layout.resolved_size[1];
             if (scroll_h > display_h) {
-                new_layout.scroll_offset -= ctx.mouse_scroll[1] * dt * 30 * scroll_spd / scroll_h;
-                new_layout.scroll_offset = std.math.clamp(new_layout.scroll_offset, 0, (scroll_h-display_h)/scroll_h);
+                // TODO: arrow key?
+                // TODO: only do this when focused
+                // handlem mouse scroll
+                layout.scroll_offset -= ctx.mouse_scroll[1] * dt * 30 * scroll_spd / scroll_h;
+
+                // handle dragging scroll bar
+                const box = Box.from_topleft(prev_layout.resolved_origin, prev_layout.resolved_size);
+                const scroll_bar = layout.get_scroll_bar_box(box);
+                layout.mouse_state = handle_btn(scroll_bar);
+                if (prev_layout.mouse_state.contains(.Down)){
+                    if (mouse_within_rect(box) and c.RGFW_isMouseDown(c.RGFW_mouseLeft) == 1) {
+                        layout.mouse_state.setPresent(.Down, true);
+                    }
+                }
+                if (layout.mouse_state.contains(.Down)) {
+                    layout.scroll_offset += ctx.mouse_delta[1]/display_h; 
+                }
+
+                // clamp everything
+                layout.scroll_offset = std.math.clamp(layout.scroll_offset, 0, (scroll_h-display_h)/scroll_h);
             }
         }
         
-        return new_layout;
+        return layout;
+    }
+
+    pub fn get_scroll_bar_w() f32 {
+        return  @max(0.02, ctx.pixels(20));
+    }
+
+    pub fn get_scroll_bar_h(node: *UI) f32 {
+        const box = Box.from_topleft(node.resolved_origin, node.resolved_size);
+        const scroll_h = node.children_bounding_size[1];
+        const scroll_bar_h = (box.size[1] / scroll_h) * box.size[1];
+        return scroll_bar_h;
+    }
+
+    pub fn get_scroll_bar_box(node: *UI, box: Box) Box {
+        const scroll_bar_h = node.get_scroll_bar_h();
+        const scroll_bar_w = get_scroll_bar_w();
+        const scroll_bar = Box {
+            .botleft = .{ box.x_right()-scroll_bar_w, box.y_top() - node.scroll_offset*box.size[1]-scroll_bar_h },
+            .size =.{ scroll_bar_w, scroll_bar_h },
+        };
+        return scroll_bar;
     }
 
     pub fn pop_layout() void {
@@ -439,8 +527,8 @@ pub const UI = struct {
 
         var largest_child = Vec2 { 0, 0 };  
         if (node.flags.contains(.layout)) {
-            node.layout_offset[0] += ctx.pixels(node.padding[0]);
-            node.layout_offset[1] -= ctx.pixels(node.padding[1]);
+            node.layout_offset[0] += ctx.pixels(node.padding[0] + node.margin[0]);
+            node.layout_offset[1] -= ctx.pixels(node.padding[1] + node.margin[1]);
             for (node.children.items) |child| {
                 // before recurring into this function, make sure the origin of `node` is resolved
                 resolve_layout_impl(node, child);
@@ -455,17 +543,17 @@ pub const UI = struct {
                     largest_child[i] = @max(largest_child[i], child.resolved_size[i]);
             }
         }
-        node.children_bounding_size[0] = @max(largest_child[0], ctx.pixels(node.padding[0]) + @abs(node.layout_offset[0]));
-        node.children_bounding_size[1] = @max(largest_child[1], ctx.pixels(node.padding[1]) + @abs(node.layout_offset[1]));
+        node.children_bounding_size[0] = @max(largest_child[0], ctx.pixels(node.padding[0] + node.margin[0]) + @abs(node.layout_offset[0]));
+        node.children_bounding_size[1] = @max(largest_child[1], ctx.pixels(node.padding[1] + node.padding[1]) + @abs(node.layout_offset[1]));
 
         switch (node.w_strategy) {
             .fit_children => {
                 node.resolved_size[0] = node.children_bounding_size[0];
             },
             .fit_text => {
-                node.resolved_size[0] = 2*ctx.pixels(node.padding[0]) + ctx.text_width(node.font_scale, node.text_content);
+                node.resolved_size[0] = 2*ctx.pixels(node.padding[0] + node.margin[0]) + ctx.text_width(node.font_scale, node.text_content);
             },
-            .fixed_in_pixels => |p| node.resolved_size[0] = ctx.pixels(2*node.padding[0] + p),
+            .fixed_in_pixels => |p| node.resolved_size[0] = ctx.pixels(2*(node.padding[0] + node.margin[0]) + p),
             .span_screen => node.resolved_size[0] = ctx.x_right() - node.resolved_origin[0],
         }
 
@@ -474,9 +562,9 @@ pub const UI = struct {
                 node.resolved_size[1] = node.children_bounding_size[1];
             },
             .fit_text => {
-                node.resolved_size[1] = 2*ctx.pixels(node.padding[1]) + ctx.cal_font_h(node.font_scale);
+                node.resolved_size[1] = 2*ctx.pixels(node.padding[1] + node.margin[1]) + ctx.cal_font_h(node.font_scale);
             },
-            .fixed_in_pixels => |p| node.resolved_size[1] = ctx.pixels(2*node.padding[1] + p),
+            .fixed_in_pixels => |p| node.resolved_size[1] = ctx.pixels(2*(node.padding[1] + node.margin[1]) + p),
             .span_screen => node.resolved_size[1] = node.resolved_origin[1] - ctx.y_bot(),
         }
     }
