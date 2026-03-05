@@ -45,42 +45,15 @@ const Renderer = struct {
     pub fn render(_: *RendererContet) void {
         const self = ctx.user_data;
         _ = self;
-        ctx.clear(.from_u32(0x303030ff));
-        {
-            _ = UI.push_layout(.Y);
-            UI.text("Header", .{ .w_strategy = .span_screen });
-            _ = UI.push_layout(.X);
-            {
-                _ = UI.push_layout(.Y);
-                for (channels) |channel| {
-                    _ = UI.text_btn(channel.title, .{ .margin = .{ 10, 10 }, .font_scale = 0.5, .w_strategy = .{ .fixed_in_pixels = 300 } });
-                }
-                UI.pop_layout();
-            }
-
-            {
-                const post_layout = UI.push_scroll_layout("post_content", .span_screen);
-                post_layout.bg_color = .from_u32(0x061e29ff);
-                for (posts) |post|
-                    _ = UI.text_btn(post.title, 
-                        .{ 
-                            .margin = .{ 10, 10 },
-                            .border_color = .white, .bg_color = .from_u32(0x303030ff),
-                            .font_scale = 0.5, .w_strategy = .span_screen
-                        });
-                UI.pop_layout();
-            }
-
-            UI.pop_layout();
-
-            UI.pop_layout();
-        }
+       
+        UI.render();
 
         UI.resolve_layout();
         render_ui();
         UI.reset_layout_tree();
         // draw_rect(.{ 0, 0 }, .{ 0.2, 0.2 }, .black);
         flush();
+        counter  += 1;
     }
 
     pub fn render_ui() void {
@@ -97,17 +70,8 @@ const Renderer = struct {
             draw_rect_lines(box.botleft, box.size, 2.5, .white);
     }
 
-    pub fn get_box(node: *UI) Box {
-        const box_with_margin = Box.from_topleft(node.resolved_origin, node.resolved_size);
-        const margin_pixels = v2pixels(node.margin);
-        const box = Box { 
-            .botleft = v2add(box_with_margin.botleft, margin_pixels),
-            .size = v2sub(box_with_margin.size, v2scal(margin_pixels, 2)) };
-        return box;
-    }
-
     fn render_ui_impl(node: *UI) void {
-        const box = get_box(node);
+        const box = node.get_border_box();
         draw_rect(box.botleft, box.size, node.bg_color);
 
 
@@ -124,9 +88,7 @@ const Renderer = struct {
             draw_text(v2add(box.botleft, v2pixels(node.padding)), node.font_scale, node.text_content, .white);
         }
 
-        if (node.flags.contains(.y_scroll)) {
-            // const scroll_h = node.children_bounding_size[1];
-            // const scroll_bar_h = node.get_scroll_bar_h();
+        if (node.flags.contains(.y_scroll) and node.should_enable_scroll()) {
             // Scroll bar background
             draw_rect(.{ box.x_right()-UI.get_scroll_bar_w(), box.botleft[1] }, .{ UI.get_scroll_bar_w(), box.size[1] }, .from_u32(0xefefefff));
             const scroll_bar = node.get_scroll_bar_box(box);
@@ -138,16 +100,16 @@ const Renderer = struct {
                 .from_u32(0x3f3f3fff));
             draw_rect_lines(scroll_bar.botleft, scroll_bar.size, 2.5, node.border_color);
             draw_btn_overlay(node.mouse_state, scroll_bar);
-
         }
 
         if (node.flags.contains(.scissor)) {
             flush();
             ctx.end_scissor();
         }
-        draw_rect_lines(box.botleft, box.size, 2.5, node.border_color);
+        draw_rect_lines(box.botleft, box.size, node.border_width, node.border_color);
+        // const outer = node.get_outer_box();
+        // draw_rect_lines(outer.botleft, outer.size, node.border_width, .white);
         if (node.flags.contains(.button)) draw_btn_overlay(node.mouse_state, box);
- 
     }
 
     fn append_state(ct: usize) void {
@@ -180,7 +142,7 @@ const Renderer = struct {
 
     fn draw_text(pos: Vec2, font_scale: f32, text: []const u8, rgba: RGBA) void {
         switch_or_append_state(
-            .{ .tex = .{ .id = ctx.default_font.tex, .w = undefined, .h = undefined }, .border_thickness = null, .shader = ctx.font_shader_pgm }, 0);
+            .{ .tex = .{ .id = ctx.fonts.tex, .w = undefined, .h = undefined }, .border_thickness = null, .shader = ctx.font_shader_pgm }, 0);
         var it = ctx.make_code_point_vertex_data(pos, font_scale, text, 1024*1024, rgba);
         while (it.next()) |vertexes| {
             append_state(1);
@@ -250,12 +212,26 @@ const Box = struct {
     // return a text_offset that defines the offset from the botleft of the box where text should be drawn
 };
 
+
 pub const UI = struct {
     pub const SizeStrategy = union(enum) {
-        fit_text,
-        fit_children,
+        // pre-order
         fixed_in_pixels: f32,
         span_screen,
+        // parent must also be pre-order
+        parent_perct: f32,
+        rest_of_parent,
+        fit_text,
+
+        // post-order
+        fit_children,
+
+        pub fn is_pre_order(self: SizeStrategy) bool {
+            switch (self) {
+                .fit_children => return false,
+                else => return true,
+            }
+        }
     };
 
     pub var key_hash: [2]std.StringHashMap(*UI) = undefined; // @init_on_main
@@ -267,16 +243,20 @@ pub const UI = struct {
     pub var prev_arena_state: *std.heap.ArenaAllocator = undefined; // @init_on_main
     pub var curr_arena: Allocator = undefined; // @init_on_main
     pub var prev_arena: Allocator = undefined; // @init_on_main
+                                               
+    pub var font: gl.Font.Dynamic = undefined; // @init_on_main
 
     flags: std.EnumSet(Flag) = std.EnumSet(Flag).initEmpty(),
 
     children: std.ArrayList(*UI) = .empty,
     text_content: []const u8 = "",
     font_scale: f32 = 1,
-    bg_color: RGBA = .transparent,
-    border_color: RGBA = .from_u32(0x7f7f7fff),
-    padding: Vec2 = .{ 10, 10 },
+    bg_color: RGBA = COLOR1,
+    border_color: RGBA = COLOR2,
+    border_width: f32 = 2,
+    padding: Vec2 = .{ 0, 0 },
     margin: Vec2 = .{ 0, 0 },
+
     w_strategy: SizeStrategy = .fit_text,
     h_strategy: SizeStrategy = .fit_text,
 
@@ -286,16 +266,61 @@ pub const UI = struct {
     layout_offset: Vec2 = .{ 0, 0 },
     layout_axis: Axis = .X,
     children_bounding_size: Vec2 = .{ 0, 0 },
-    resolved_size: Vec2 = .{ 0, 0 },
+    resolved_size: Vec2 = .{ 0, 0 }, // this includes padding and margin
     resolved_origin: Vec2 = .{ 0, 0 }, // for now, the origin of a box is its topleft corner
 
     mouse_state: std.EnumSet(MouseState) = .initEmpty(),
 
+    const COLOR1 = RGBA.from_u32(0x1b211aff);
+    const COLOR2 = RGBA.from_u32(0x547792ff);
+
+    pub fn render() void {
+        ctx.clear(.from_u32(0x303030ff));
+        {
+            _ = push_layout(.Y, .{ .w_strategy = .span_screen, .h_strategy = .span_screen });
+            text("Header", .{ .padding = .{ 10, 10 }, .w_strategy = .rest_of_parent });
+            {
+                _ = push_layout(.X, .{ .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .rest_of_parent });
+                const channel_layout = push_scroll_layout("channel_content",
+                    .{ .padding = .{ 10, 10 }, .margin = .{ 10, 10 }, .w_strategy = .{ .parent_perct = 0.2 }, .h_strategy = .rest_of_parent });
+                _ = channel_layout;
+                for (channels) |channel| {
+                    _ = text_btn(channel.title,
+                        .{ .padding = .{ 10, 10 }, .margin = .{ 4, 4 },
+                            .font_scale = 0.5, .w_strategy = .{ .parent_perct = 1.0 }
+                        });
+                }
+                _ = text_btn("xx",
+                    .{ .padding = .{ 10, 10 }, .margin = .{ 4, 4 },
+                        .font_scale = 0.5, .w_strategy = .{ .parent_perct = 1.0 }
+                    });
+                pop_layout();
+            }
+
+            {
+                const post_layout = push_scroll_layout("post_content", .{ .w_strategy = .{ .parent_perct = 0.8 }, .h_strategy = .{ .parent_perct = 1 } });
+                _ = post_layout;
+                for (posts) |post|
+                    _ = text_btn(post.title, 
+                        .{ 
+                            .padding = .{ 10, 10 }, .margin = .{ 4, 4 },
+                            .border_color = .transparent, .bg_color = .transparent,
+                            .font_scale = 0.5, .w_strategy = .{ .parent_perct = 1 },
+                        });
+                pop_layout();
+            }
+
+
+            pop_layout();
+        }
+    }
+
     const UIOptions = struct {
         font_scale: f32 = 1,
-        bg_color: RGBA = .transparent,
-        border_color: RGBA = .from_u32(0x7f7f7fff),
-        padding: Vec2 = .{ 10, 10 },
+        bg_color: RGBA = COLOR1,
+        border_color: RGBA = COLOR2,
+        border_width: f32 = 2,
+        padding: Vec2 = .{ 0, 0 },
         margin: Vec2 = .{ 0, 0 },
         w_strategy: SizeStrategy = .fit_text,
         h_strategy: SizeStrategy = .fit_text,
@@ -319,6 +344,29 @@ pub const UI = struct {
         Clicked,
     };
 
+    pub fn get_outer_box(node: *const UI) Box {
+        return Box.from_topleft(node.resolved_origin, node.resolved_size);
+    }
+
+    pub fn get_border_box(node: *const UI) Box {
+        const box_with_margin = node.get_outer_box();
+        const margin_pixels = v2pixels(node.margin);
+        const box = Box { 
+            .botleft = v2add(box_with_margin.botleft, margin_pixels),
+            .size = v2sub(box_with_margin.size, v2scal(margin_pixels, 2))
+        };
+        return box;
+    }
+
+    pub fn get_content_box(node: *const UI) Box {
+        const border = node.get_border_box();
+        const padding = v2pixels(node.padding);
+        const box = Box { 
+            .botleft = v2add(border.botleft, padding),
+            .size = v2sub(border.size, v2scal(padding, 2))
+        };
+        return box;
+    }
 
     fn within_rect(p: Vec2, box: Box) bool {
         const botleft = box.botleft;
@@ -332,14 +380,10 @@ pub const UI = struct {
     }
 
     fn set_opts(ui: *UI, opts: UIOptions) void {
-        ui.font_scale = opts.font_scale;
-        ui.bg_color = opts.bg_color;
-        ui.border_color = opts.border_color;
-        ui.padding = opts.padding;
-        ui.margin = opts.margin;
-        ui.w_strategy = opts.w_strategy;
-        ui.h_strategy = opts.h_strategy;
-
+        const struct_info = @typeInfo(UIOptions).@"struct";
+        inline for (struct_info.fields) |field| {
+           @field(ui, field.name) = @field(opts, field.name);
+        }
     }
 
     pub fn text(content: []const u8, opts: UIOptions) void {
@@ -392,14 +436,11 @@ pub const UI = struct {
     pub var layouts_stack: std.ArrayList(*UI) = .empty;
     pub var root_layout: *UI = undefined; // @init_on_main
 
-    pub fn push_layout(axis: Axis) *UI {
+    pub fn push_layout(axis: Axis, opts: UIOptions) *UI {
         const new_layout = new_default();
         new_layout.flags.setPresent(.layout, true);
         new_layout.layout_axis = axis;
-        new_layout.w_strategy = .fit_children;
-        new_layout.h_strategy = .fit_children;
-        new_layout.padding = .{ 0, 0 };
-        // new_layout.border_color = .transparent;
+        new_layout.set_opts(opts);
 
         if (layouts_stack.items.len == 0) {
             root_layout = new_layout;
@@ -410,13 +451,12 @@ pub const UI = struct {
         return new_layout;
     }
 
-    pub fn push_scroll_layout(str_hash: []const u8, h_strategy: SizeStrategy) *UI {
+    pub fn push_scroll_layout(str_hash: []const u8, opts: UIOptions) *UI {
         const dt = ctx.get_delta_time();
         const scroll_spd = 1;
-        const layout = push_layout(.Y);
+        const layout = push_layout(.Y, opts);
         layout.flags.setPresent(.y_scroll, true);
         layout.flags.setPresent(.scissor, true);
-        layout.h_strategy = h_strategy;
 
         curr_hash.putNoClobber(str_hash, layout) catch unreachable;
 
@@ -476,6 +516,12 @@ pub const UI = struct {
         return scroll_bar;
     }
 
+    pub fn should_enable_scroll(layout: UI) bool {
+        const scroll_h = layout.children_bounding_size[1];
+        const display_h = layout.resolved_size[1];
+        return scroll_h > display_h;
+    }
+
     pub fn pop_layout() void {
         _ = layouts_stack.pop().?;
     }
@@ -492,11 +538,6 @@ pub const UI = struct {
         return root_layout;
     }
 
-    pub fn resolve_layout() void {
-        const root = get_root_layout();
-        resolve_layout_impl(null, root);
-    }
-
     pub fn reset_layout_tree() void {
         prev_hash.clearRetainingCapacity();
         std.mem.swap(std.StringHashMap(*UI), prev_hash, curr_hash);
@@ -509,6 +550,10 @@ pub const UI = struct {
         layouts_stack.clearRetainingCapacity();
     }
 
+    pub fn resolve_layout() void {
+        const root = get_root_layout();
+        resolve_layout_impl(null, root);
+    }
 
     // A recursive function to resolve layout
     // The origin of parent must be resolved before called.
@@ -519,12 +564,68 @@ pub const UI = struct {
             assert(parent.flags.contains(.layout));
             node.resolved_origin[0] = parent.resolved_origin[0] + parent.layout_offset[0];
             node.resolved_origin[1] = parent.resolved_origin[1] + parent.layout_offset[1] + parent.scroll_offset * parent.children_bounding_size[1];
+            // if (parent.scroll_offset > 0) 
+            //     log.debug("offset: {} {}", .{ parent.scroll_offset * parent.children_bounding_size[1], parent.children_bounding_size[1] });
         } else {
             // topleft corner of the screen
             node.resolved_origin[0] = ctx.x_left();
             node.resolved_origin[1] = ctx.y_top();
         }
 
+        
+        switch (node.w_strategy) {
+            .fit_text => {
+                node.resolved_size[0] = 2*ctx.pixels(node.padding[0] + node.margin[0]) + ctx.text_width(node.font_scale, node.text_content);
+            },
+            .fixed_in_pixels => |p| node.resolved_size[0] = ctx.pixels(2*(node.padding[0] + node.margin[0]) + p),
+            .span_screen => node.resolved_size[0] = ctx.x_right() - node.resolved_origin[0],
+
+            .parent_perct,
+            .rest_of_parent => {
+                const parent = maybe_parent orelse unreachable;
+                const parent_box = parent.get_content_box();
+                switch (node.w_strategy) {
+                    .parent_perct => |prect| {
+                        assert(parent.w_strategy.is_pre_order());
+                        node.resolved_size[0] = parent_box.size[0] * prect;
+                    },
+                    .rest_of_parent => {
+                        assert(parent.w_strategy.is_pre_order());
+                        node.resolved_size[0] = parent_box.size[0] - parent.layout_offset[0];
+                    },
+                    else => unreachable,
+                }
+            },
+            else => |strat| assert(!strat.is_pre_order()),
+        }
+
+        switch (node.h_strategy) {
+            .fit_text => {
+                node.resolved_size[1] = 2*ctx.pixels(node.padding[1] + node.margin[1]) + ctx.cal_font_h(node.font_scale);
+            },
+            .fixed_in_pixels => |p| node.resolved_size[1] = ctx.pixels(2*(node.padding[1] + node.margin[1]) + p),
+            .span_screen => node.resolved_size[1] = node.resolved_origin[1] - ctx.y_bot(),
+
+            .parent_perct,
+            .rest_of_parent => {
+                const parent = maybe_parent orelse unreachable;
+                const parent_box = parent.get_content_box();
+                switch (node.h_strategy) {
+                    .parent_perct => |prect| {
+                        assert(parent.w_strategy.is_pre_order());
+                        node.resolved_size[1] = parent_box.size[1] * prect;
+                    },
+                    .rest_of_parent => {
+                        assert(parent.w_strategy.is_pre_order());
+                        node.resolved_size[1] = parent_box.size[1] + parent.layout_offset[1];
+                    },
+                    else => unreachable,
+                }
+
+            },
+            else => |strat| assert(!strat.is_pre_order()),
+        }
+        
         var largest_child = Vec2 { 0, 0 };  
         if (node.flags.contains(.layout)) {
             node.layout_offset[0] += ctx.pixels(node.padding[0] + node.margin[0]);
@@ -544,29 +645,26 @@ pub const UI = struct {
             }
         }
         node.children_bounding_size[0] = @max(largest_child[0], ctx.pixels(node.padding[0] + node.margin[0]) + @abs(node.layout_offset[0]));
-        node.children_bounding_size[1] = @max(largest_child[1], ctx.pixels(node.padding[1] + node.padding[1]) + @abs(node.layout_offset[1]));
+        node.children_bounding_size[1] = @max(largest_child[1], ctx.pixels(node.padding[1] + node.margin[1]) + @abs(node.layout_offset[1]));
+
+        
 
         switch (node.w_strategy) {
             .fit_children => {
                 node.resolved_size[0] = node.children_bounding_size[0];
             },
-            .fit_text => {
-                node.resolved_size[0] = 2*ctx.pixels(node.padding[0] + node.margin[0]) + ctx.text_width(node.font_scale, node.text_content);
-            },
-            .fixed_in_pixels => |p| node.resolved_size[0] = ctx.pixels(2*(node.padding[0] + node.margin[0]) + p),
-            .span_screen => node.resolved_size[0] = ctx.x_right() - node.resolved_origin[0],
+            else => |strat| assert(strat.is_pre_order()),
         }
 
         switch (node.h_strategy) {
             .fit_children => {
                 node.resolved_size[1] = node.children_bounding_size[1];
             },
-            .fit_text => {
-                node.resolved_size[1] = 2*ctx.pixels(node.padding[1] + node.margin[1]) + ctx.cal_font_h(node.font_scale);
-            },
-            .fixed_in_pixels => |p| node.resolved_size[1] = ctx.pixels(2*(node.padding[1] + node.margin[1]) + p),
-            .span_screen => node.resolved_size[1] = node.resolved_origin[1] - ctx.y_bot(),
+            else => |strat| assert(strat.is_pre_order()),
         }
+        if (node.scroll_offset > 0) 
+            log.debug("perct: {}", .{ node.children_bounding_size[1] / ctx.pixel_scale });
+
     }
 };
 
@@ -590,6 +688,7 @@ pub fn main() !void {
     UI.curr_arena = UI.ui_arena_state[0].allocator();
     UI.prev_arena = UI.ui_arena_state[1].allocator();
 
+    
     std.log.debug("init database.", .{});
     rss_db = try Sqlite.init("feed.db");
     defer rss_db.deinit();
@@ -605,6 +704,7 @@ pub fn main() !void {
     var renderer = Renderer {};
 
     try RendererContet.init(&ctx, &renderer, Renderer.render, "RSS Reader", 1920, 1024, gpa);
+
     while (!ctx.window_should_close()) {
         ctx.render();
     }

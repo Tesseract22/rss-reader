@@ -544,7 +544,7 @@ const UI = struct {
     fn flush(ctx: *UIContext) void {
         const ui = ctx.user_data;
         ctx.draw_tex_batch(ui.batch_rects.items, ctx.white_tex, null, ctx.base_shader_pgm);
-        ctx.draw_tex_batch(ui.batch_texts.items, .{ .id = ctx.default_font.tex, .w = undefined, .h = undefined }, null, ctx.font_shader_pgm);
+        ctx.draw_tex_batch(ui.batch_texts.items, .{ .id = ctx.fonts.tex, .w = undefined, .h = undefined }, null, ctx.font_shader_pgm);
 
         // ctx.draw_text(.{ -0.5, -0.1}, 1, "Hello World", .yellow);
         // for (ui.batch_texts.items[1..]) |vertexes| {
