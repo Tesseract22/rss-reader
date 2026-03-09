@@ -555,6 +555,8 @@ pub const UI = struct {
         resolve_layout_impl(null, root);
     }
 
+    pub var diff_max: f32 = 0;
+
     // A recursive function to resolve layout
     // The origin of parent must be resolved before called.
     //
@@ -563,9 +565,7 @@ pub const UI = struct {
         if (maybe_parent) |parent| {
             assert(parent.flags.contains(.layout));
             node.resolved_origin[0] = parent.resolved_origin[0] + parent.layout_offset[0];
-            node.resolved_origin[1] = parent.resolved_origin[1] + parent.layout_offset[1] + parent.scroll_offset * parent.children_bounding_size[1];
-            // if (parent.scroll_offset > 0) 
-            //     log.debug("offset: {} {}", .{ parent.scroll_offset * parent.children_bounding_size[1], parent.children_bounding_size[1] });
+            node.resolved_origin[1] = parent.resolved_origin[1] + parent.layout_offset[1];
         } else {
             // topleft corner of the screen
             node.resolved_origin[0] = ctx.x_left();
@@ -648,6 +648,11 @@ pub const UI = struct {
         node.children_bounding_size[1] = @max(largest_child[1], ctx.pixels(node.padding[1] + node.margin[1]) + @abs(node.layout_offset[1]));
 
         
+        if (node.flags.contains(.layout)) {
+            for (node.children.items) |child| {
+                child.resolved_origin[1] += node.scroll_offset * node.children_bounding_size[1];
+            }
+        }
 
         switch (node.w_strategy) {
             .fit_children => {
@@ -662,9 +667,6 @@ pub const UI = struct {
             },
             else => |strat| assert(strat.is_pre_order()),
         }
-        if (node.scroll_offset > 0) 
-            log.debug("perct: {}", .{ node.children_bounding_size[1] / ctx.pixel_scale });
-
     }
 };
 
