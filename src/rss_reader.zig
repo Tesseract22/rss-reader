@@ -45,6 +45,8 @@ const Renderer = struct {
     pub var frame_time_sum: f32 = 0;
     pub var fps: f32 = 0;
 
+    pub var scissor_stack: std.ArrayList(Box) = .empty;
+
     pub fn render(_: *RendererContet) void {
         const self = ctx.user_data;
         _ = self;
@@ -91,22 +93,28 @@ const Renderer = struct {
             draw_rect_lines(box.botleft, box.size, 2.5, .white);
     }
 
-    fn render_ui_impl(node: *UI) void {
+    fn render_ui_impl(node: *const UI) void {
         const box = node.get_border_box();
         draw_rect(box.botleft, box.size, node.bg_color);
 
 
-        if (node.flags.contains(.scissor)) {
-            flush();
-            ctx.begin_scissor_gl_coord(box.botleft, box.size); // TODO: handle stack of scissors
-        }
-        
-        if (node.flags.contains(.layout)) {
-            for (node.children.items) |child| {
-                render_ui_impl(child);
+        render_content: {
+            if (node.flags.contains(.scissor)) {
+                flush();
+                if (!push_scissor(box)) break :render_content;
             }
-        } else {
-            draw_text(v2add(box.botleft, v2pixels(node.padding)), node.font_scale, node.text_content, .white);
+
+            if (node.flags.contains(.layout)) {
+                for (node.children.items) |child| {
+                    render_ui_impl(child);
+                }
+            } else {
+                draw_text(v2add(box.botleft, v2pixels(node.padding)), node.font_scale, node.text_content, .white);
+            }
+
+            if (node.flags.contains(.scissor)) {
+                pop_scissor();
+            }
         }
 
         if (node.flags.contains(.y_scroll) and node.should_enable_scroll()) {
@@ -122,11 +130,7 @@ const Renderer = struct {
             draw_rect_lines(scroll_bar.botleft, scroll_bar.size, 2.5, node.border_color);
             draw_btn_overlay(node.mouse_state, scroll_bar);
         }
-
-        if (node.flags.contains(.scissor)) {
-            flush();
-            ctx.end_scissor();
-        }
+        
         draw_rect_lines(box.botleft, box.size, node.border_width, node.border_color);
         // const outer = node.get_outer_box();
         // draw_rect_lines(outer.botleft, outer.size, node.border_width, .white);
@@ -161,6 +165,7 @@ const Renderer = struct {
         batches.append(gpa, ctx.make_rect_vertex_data(botleft, size, rgba)) catch unreachable;
     }
 
+    // TODO: handle text overflow
     fn draw_text(pos: Vec2, font_scale: f32, text: []const u8, rgba: RGBA) void {
         switch_or_append_state(
             .{ .tex = .{ .id = ctx.fonts.tex, .w = undefined, .h = undefined }, .border_thickness = null, .shader = ctx.font_shader_pgm }, 0);
@@ -180,6 +185,30 @@ const Renderer = struct {
 
         batches.clearRetainingCapacity();
         batches_state.clearRetainingCapacity();
+    }
+
+    // return false if the new scissor does not overlap with the last scissor at all,
+    // and thus all drawing can be skipped
+    fn push_scissor(box: Box) bool {
+        flush();
+        const new_scissor = if (scissor_stack.getLastOrNull()) |top|
+            top.intersect(box) orelse return false
+        else 
+            box;
+
+        ctx.begin_scissor_gl_coord(new_scissor.botleft, new_scissor.size);
+        scissor_stack.append(UI.curr_arena, new_scissor) catch @panic("OOM");
+        return true;
+    }
+
+    fn pop_scissor() void {
+        flush();
+        _ = scissor_stack.pop().?;
+        if (scissor_stack.getLastOrNull()) |top| {
+            ctx.begin_scissor_gl_coord(top.botleft, top.size);
+        } else {
+            ctx.end_scissor();
+        }
     }
 };
 const RendererContet = gl.Context(Renderer);
@@ -230,8 +259,32 @@ const Box = struct {
             .size = size,
         };
     }
+
+    pub fn intersect(a: Box, b: Box) ?Box {
+        const botleft = Vec2 {
+            @max(a.botleft[0], b.botleft[0]),
+            @max(a.botleft[1], b.botleft[1]),
+        };
+        const topright = Vec2 {
+            @min(a.botleft[0] + a.size[0], b.botleft[0] + b.size[0]),
+            @min(a.botleft[1] + a.size[1], b.botleft[1] + b.size[1]),
+
+        };
+
+        if (topright[0] <= botleft[0] or topright[1] <= botleft[1]) return null;
+        return Box {
+            .botleft = botleft,
+            .size = v2sub(topright, botleft),
+        };
+    }
     // return a text_offset that defines the offset from the botleft of the box where text should be drawn
 };
+
+fn find_channel_by_id(channel: u32) Sqlite.ChannelWithId {
+    for (channels) |ch| {
+        if (ch.rowid == channel) return ch;     
+    } else return .{ .rowid = std.math.maxInt(u32), .title = "unknown" };
+}
 
 
 pub const UI = struct {
@@ -266,6 +319,8 @@ pub const UI = struct {
     pub var prev_arena: Allocator = undefined; // @init_on_main
     pub var tmp_arena_state: std.heap.ArenaAllocator = undefined; // @init_on_main
     pub var tmp_arena: Allocator = undefined; // @init_on_main
+
+    pub var prev_pixel_scale: f32 = undefined; // @init_on_main
                                                
     pub var font: gl.Font.Dynamic = undefined; // @init_on_main
 
@@ -290,6 +345,7 @@ pub const UI = struct {
     layout_axis: Axis = .X,
     children_bounding_size: Vec2 = .{ 0, 0 },
     resolved_size: Vec2 = .{ 0, 0 }, // this includes padding and margin
+    target_size: Vec2 = .{ 0, 0 }, 
     resolved_origin: Vec2 = .{ 0, 0 }, // for now, the origin of a box is its topleft corner
 
     mouse_state: std.EnumSet(MouseState) = .initEmpty(),
@@ -305,23 +361,19 @@ pub const UI = struct {
     pub fn render() void {
         ctx.clear(.from_u32(0x303030ff));
         {
-            _ = push_layout(.Y, .{ .w_strategy = .span_screen, .h_strategy = .span_screen });
+            _ = push_layout(.Y, "outer", .{ .w_strategy = .span_screen, .h_strategy = .span_screen });
             text("Header", .{ .padding = .{ 10, 10 }, .w_strategy = .rest_of_parent });
             {
-                _ = push_layout(.X, .{ .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .rest_of_parent });
+                _ = push_layout(.X, "main", .{ .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .rest_of_parent });
                 const channel_layout = push_scroll_layout("channel_content",
                     .{ .padding = .{ 10, 10 }, .margin = .{ 10, 10 }, .w_strategy = .{ .parent_perct = 0.2 }, .h_strategy = .rest_of_parent });
                 _ = channel_layout;
                 for (channels) |channel| {
-                    _ = text_btn(channel.title,
+                    _ = text_btn(frame_fmt("{s}#channel", .{ channel.title }),
                         .{ .padding = .{ 10, 10 }, .margin = .{ 4, 4 },
                             .font_scale = 0.5, .w_strategy = .{ .parent_perct = 1.0 }
                         });
                 }
-                _ = text_btn("xx",
-                    .{ .padding = .{ 10, 10 }, .margin = .{ 4, 4 },
-                        .font_scale = 0.5, .w_strategy = .{ .parent_perct = 1.0 }
-                    });
                 pop_layout();
             }
 
@@ -330,30 +382,41 @@ pub const UI = struct {
                 _ = post_layout;
                 for (posts) |post| {
                     const selected = std.mem.eql(u8, post.guid, selected_post_id);
-                    if (text_btn(post.title, 
+                    if (text_btn(frame_fmt("{s}#post_title", .{ post.title }), 
                         .{ 
-                            .padding = .{ 10, 10 }, .margin = .{ 10, 0 },
+                            .padding = .{ 10, 20 }, .margin = .{ 10, 0 },
                             .border_color = if (selected) .white else .transparent, .bg_color = if (selected) COLOR2 else .transparent,
                             .font_scale = 0.5, .w_strategy = .{ .parent_perct = 1 },
+                            .flags = .initMany(&.{ .scissor }),
                         })) {
                         if (selected) selected_post_id = ""
                         else selected_post_id = post.guid;
                     }
 
                     if (selected) {
-                        _ = push_layout(.Y, .{ 
+                        const detail_layout = push_layout(.Y, frame_fmt("{s}#detail", .{ post.guid }), .{ 
                             .padding = .{ 10, 10 }, .margin = .{ 10, 0 },
                             .border_color = .white, .bg_color = .transparent,
                             .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .fit_children,
                         });
-                        text(post.description, 
+                        detail_layout.flags.setPresent(.animated, true);
+                        detail_layout.flags.setPresent(.scissor, true);
+
+                        text(frame_fmt("By {s}#detail_channel", .{ find_channel_by_id(post.channel).title }), 
                             .{ 
                                 .padding = .{ 10, 10 }, .margin = .{ 0, 0 },
                                 .border_color = .transparent, .bg_color = .transparent,
                                 .font_scale = 0.4,
                                 .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .fit_text,
                             });
-                        _ = text_btn(post.link, 
+                        text(frame_fmt("{s}#detail_description", .{ post.description }), 
+                            .{ 
+                                .padding = .{ 10, 10 }, .margin = .{ 0, 0 },
+                                .border_color = .transparent, .bg_color = .transparent,
+                                .font_scale = 0.4,
+                                .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .fit_text,
+                            });
+                        _ = text_btn(frame_fmt("{s}#detail_link", .{ post.link }), 
                             .{ 
                                 .padding = .{ 10, 10 }, .margin = .{ 0, 0 },
                                 .border_color = .transparent, .bg_color = .transparent,
@@ -369,6 +432,7 @@ pub const UI = struct {
 
             pop_layout();
         }
+        prev_pixel_scale = ctx.pixel_scale;
     }
 
     const UIOptions = struct {
@@ -380,6 +444,7 @@ pub const UI = struct {
         margin: Vec2 = .{ 0, 0 },
         w_strategy: SizeStrategy = .fit_text,
         h_strategy: SizeStrategy = .fit_text,
+        flags: std.EnumSet(Flag) = std.EnumSet(Flag).initEmpty(),
     };
 
     pub const Axis = enum(u8) {
@@ -392,6 +457,7 @@ pub const UI = struct {
         y_scroll,
         scissor,
         button,
+        animated,
     };
 
     pub const MouseState = enum {
@@ -402,8 +468,12 @@ pub const UI = struct {
 
     // the result is invalidated the next time tmp_fmt is called
     pub fn tmp_fmt(comptime fmt: []const u8, args: anytype) []const u8 {
-        tmp_arena_state.reset(.retain_capacity);
+        _ = tmp_arena_state.reset(.retain_capacity);
         return std.fmt.allocPrint(tmp_arena, fmt, args) catch @panic("OOM");
+    }
+
+    pub fn frame_fmt(comptime fmt: []const u8, args: anytype) []const u8 {
+        return std.fmt.allocPrint(curr_arena, fmt, args) catch @panic("OOM");
     }
 
     pub fn get_outer_box(node: *const UI) Box {
@@ -455,9 +525,18 @@ pub const UI = struct {
         return if (content.len == 0) "(empty)" else content;
     }
 
+    pub fn cut_text_hash(str_hash: []const u8) []const u8 {
+        const hash_index = std.mem.indexOfScalar(u8, str_hash, '#') orelse return str_hash;
+        return str_hash[0..hash_index]; 
+    }
+
+    pub fn preprocess_text(txt: []const u8) []const u8 {
+        return check_non_empty(cut_text_hash(txt));
+    }
+
     pub fn text(content: []const u8, opts: UIOptions) void {
         const ui = new_default();     
-        ui.text_content = check_non_empty(content);
+        ui.text_content = preprocess_text(content);
         set_opts(ui, opts);
         ui.add_to_layout();
     }
@@ -474,10 +553,10 @@ pub const UI = struct {
     // better hashing strategies
     pub fn text_btn(content: []const u8, opts: UIOptions) bool {
         const ui = new_default();     
-
-        ui.text_content = check_non_empty(content);
-        ui.flags.setPresent(.button, true);
         set_opts(ui, opts);
+
+        ui.text_content = preprocess_text(content);
+        ui.flags.setPresent(.button, true);
         ui.add_to_layout();
 
         curr_hash.putNoClobber(content, ui) catch unreachable;
@@ -505,35 +584,38 @@ pub const UI = struct {
     pub var layouts_stack: std.ArrayList(*UI) = .empty;
     pub var root_layout: *UI = undefined; // @init_on_main
 
-    pub fn push_layout(axis: Axis, opts: UIOptions) *UI {
-        const new_layout = new_default();
-        new_layout.flags.setPresent(.layout, true);
-        new_layout.layout_axis = axis;
-        new_layout.set_opts(opts);
+    pub fn push_layout(axis: Axis, str_hash: []const u8, opts: UIOptions) *UI {
+        const layout = new_default();
+        layout.set_opts(opts);
+        layout.flags.setPresent(.layout, true);
+        layout.layout_axis = axis;
 
         if (layouts_stack.items.len == 0) {
-            root_layout = new_layout;
+            root_layout = layout;
         } else {
-            new_layout.add_to_layout();
+            layout.add_to_layout();
         }
-        layouts_stack.append(gpa, new_layout) catch @panic("OOM");
-        return new_layout;
+        layouts_stack.append(gpa, layout) catch @panic("OOM");
+
+        curr_hash.putNoClobber(str_hash, layout) catch unreachable;
+        if (prev_hash.get(str_hash)) |prev_layout| {
+            layout.resolved_size = prev_layout.resolved_size; // TODO: handle target_resolved_size
+        }
+        return layout;
     }
 
     pub fn push_scroll_layout(str_hash: []const u8, opts: UIOptions) *UI {
         const dt = ctx.get_delta_time();
         const scroll_spd = 1;
-        const layout = push_layout(.Y, opts);
+        const layout = push_layout(.Y, str_hash, opts);
         layout.flags.setPresent(.y_scroll, true);
         layout.flags.setPresent(.scissor, true);
-
-        curr_hash.putNoClobber(str_hash, layout) catch unreachable;
 
         if (prev_hash.get(str_hash)) |prev_layout| {
             layout.scroll_offset = prev_layout.scroll_offset;
             layout.children_bounding_size = prev_layout.children_bounding_size;
             layout.resolved_origin = prev_layout.resolved_origin;
-            layout.resolved_size = prev_layout.resolved_size;
+            // layout.resolved_size = prev_layout.resolved_size; // TODO: handle target_resolved_size
 
             const scroll_h = layout.children_bounding_size[1];
             const display_h = prev_layout.resolved_size[1];
@@ -568,14 +650,14 @@ pub const UI = struct {
         return  @max(0.02, ctx.pixels(20));
     }
 
-    pub fn get_scroll_bar_h(node: *UI) f32 {
+    pub fn get_scroll_bar_h(node: *const UI) f32 {
         const box = Box.from_topleft(node.resolved_origin, node.resolved_size);
         const scroll_h = node.children_bounding_size[1];
         const scroll_bar_h = (box.size[1] / scroll_h) * box.size[1];
         return scroll_bar_h;
     }
 
-    pub fn get_scroll_bar_box(node: *UI, box: Box) Box {
+    pub fn get_scroll_bar_box(node: *const UI, box: Box) Box {
         const scroll_bar_h = node.get_scroll_bar_h();
         const scroll_bar_w = get_scroll_bar_w();
         const scroll_bar = Box {
@@ -632,6 +714,97 @@ pub const UI = struct {
             offset_origin_recursive(child, offset);
     }
 
+    fn resolve_size_from_target(node: *UI, axis: Axis) void {
+        if (node.flags.contains(.animated)) {
+            node.resolved_size[@intFromEnum(axis)] = exp_smooth(node.resolved_size[@intFromEnum(axis)], node.target_size[@intFromEnum(axis)], ctx.get_delta_time());
+        } else {
+            node.resolved_size[@intFromEnum(axis)] = node.target_size[@intFromEnum(axis)];
+        }
+    } 
+
+    // TODO: works with pixel directly
+    fn resolve_size_pre_order(maybe_parent: ?*const UI, node: *UI) void {
+        if (node.w_strategy.is_pre_order()) {
+            switch (node.w_strategy) {
+                .fit_text => {
+                    node.target_size[0] = 2*ctx.pixels(node.padding[0] + node.margin[0]) + ctx.text_width(node.font_scale, node.text_content);
+                },
+                .fixed_in_pixels => |p| node.target_size[0] = ctx.pixels(2*(node.padding[0] + node.margin[0]) + p),
+                .span_screen => node.target_size[0] = ctx.x_right() - node.resolved_origin[0],
+
+                .parent_perct,
+                .rest_of_parent => {
+                    const parent = maybe_parent orelse unreachable;
+                    const parent_box = parent.get_content_box();
+                    switch (node.w_strategy) {
+                        .parent_perct => |prect| {
+                            assert(parent.w_strategy.is_pre_order());
+                            node.target_size[0] = parent_box.size[0] * prect;
+                        },
+                        .rest_of_parent => {
+                            assert(parent.w_strategy.is_pre_order());
+                            node.target_size[0] = parent_box.size[0] - parent.layout_offset[0];
+                        },
+                        else => unreachable,
+                    }
+                },
+                else => |strat| assert(!strat.is_pre_order()),
+            }
+            resolve_size_from_target(node, .X);
+        }
+
+        if (node.h_strategy.is_pre_order()) {
+            switch (node.h_strategy) {
+                .fit_text => {
+                    node.target_size[1] = 2*ctx.pixels(node.padding[1] + node.margin[1]) + ctx.cal_font_h(node.font_scale);
+                },
+                .fixed_in_pixels => |p| node.target_size[1] = ctx.pixels(2*(node.padding[1] + node.margin[1]) + p),
+                .span_screen => node.target_size[1] = node.resolved_origin[1] - ctx.y_bot(),
+
+                .parent_perct,
+                .rest_of_parent => {
+                    const parent = maybe_parent orelse unreachable;
+                    const parent_box = parent.get_content_box();
+                    switch (node.h_strategy) {
+                        .parent_perct => |prect| {
+                            assert(parent.w_strategy.is_pre_order());
+                            node.target_size[1] = parent_box.size[1] * prect;
+                        },
+                        .rest_of_parent => {
+                            assert(parent.w_strategy.is_pre_order());
+                            node.target_size[1] = parent_box.size[1] + parent.layout_offset[1];
+                        },
+                        else => unreachable,
+                    }
+
+                },
+                else => |strat| assert(!strat.is_pre_order()),
+            }
+            resolve_size_from_target(node, .Y);
+        }
+    }
+
+    fn resolve_size_post_order(_: ?*const UI, node: *UI) void {
+        if (!node.w_strategy.is_pre_order()) {
+            switch (node.w_strategy) {
+                .fit_children => {
+                    node.target_size[0] = node.children_bounding_size[0];
+                },
+                else => |strat| assert(strat.is_pre_order()),
+            }
+            resolve_size_from_target(node, .X);
+        }
+        if (!node.h_strategy.is_pre_order()) {
+            switch (node.h_strategy) {
+                .fit_children => {
+                    node.target_size[1] = node.children_bounding_size[1];
+                },
+                else => |strat| assert(strat.is_pre_order()),
+            }
+            resolve_size_from_target(node, .Y);
+        }
+    }
+
     // A recursive function to resolve layout
     // The origin of parent must be resolved before called.
     //
@@ -647,60 +820,8 @@ pub const UI = struct {
             node.resolved_origin[1] = ctx.y_top();
         }
 
-        
-        switch (node.w_strategy) {
-            .fit_text => {
-                node.resolved_size[0] = 2*ctx.pixels(node.padding[0] + node.margin[0]) + ctx.text_width(node.font_scale, node.text_content);
-            },
-            .fixed_in_pixels => |p| node.resolved_size[0] = ctx.pixels(2*(node.padding[0] + node.margin[0]) + p),
-            .span_screen => node.resolved_size[0] = ctx.x_right() - node.resolved_origin[0],
-
-            .parent_perct,
-            .rest_of_parent => {
-                const parent = maybe_parent orelse unreachable;
-                const parent_box = parent.get_content_box();
-                switch (node.w_strategy) {
-                    .parent_perct => |prect| {
-                        assert(parent.w_strategy.is_pre_order());
-                        node.resolved_size[0] = parent_box.size[0] * prect;
-                    },
-                    .rest_of_parent => {
-                        assert(parent.w_strategy.is_pre_order());
-                        node.resolved_size[0] = parent_box.size[0] - parent.layout_offset[0];
-                    },
-                    else => unreachable,
-                }
-            },
-            else => |strat| assert(!strat.is_pre_order()),
-        }
-
-        switch (node.h_strategy) {
-            .fit_text => {
-                node.resolved_size[1] = 2*ctx.pixels(node.padding[1] + node.margin[1]) + ctx.cal_font_h(node.font_scale);
-            },
-            .fixed_in_pixels => |p| node.resolved_size[1] = ctx.pixels(2*(node.padding[1] + node.margin[1]) + p),
-            .span_screen => node.resolved_size[1] = node.resolved_origin[1] - ctx.y_bot(),
-
-            .parent_perct,
-            .rest_of_parent => {
-                const parent = maybe_parent orelse unreachable;
-                const parent_box = parent.get_content_box();
-                switch (node.h_strategy) {
-                    .parent_perct => |prect| {
-                        assert(parent.w_strategy.is_pre_order());
-                        node.resolved_size[1] = parent_box.size[1] * prect;
-                    },
-                    .rest_of_parent => {
-                        assert(parent.w_strategy.is_pre_order());
-                        node.resolved_size[1] = parent_box.size[1] + parent.layout_offset[1];
-                    },
-                    else => unreachable,
-                }
-
-            },
-            else => |strat| assert(!strat.is_pre_order()),
-        }
-        
+        node.resolved_size = v2scal(node.resolved_size, ctx.pixel_scale/prev_pixel_scale);
+        resolve_size_pre_order(maybe_parent, node); 
         {
             var largest_child = Vec2 { 0, 0 };  
             node.layout_offset[0] += ctx.pixels(node.padding[0] + node.margin[0]);
@@ -726,20 +847,7 @@ pub const UI = struct {
                 offset_origin_recursive(child, .{ 0, node.scroll_offset * node.children_bounding_size[1]});
             }
         }
-
-        switch (node.w_strategy) {
-            .fit_children => {
-                node.resolved_size[0] = node.children_bounding_size[0];
-            },
-            else => |strat| assert(strat.is_pre_order()),
-        }
-
-        switch (node.h_strategy) {
-            .fit_children => {
-                node.resolved_size[1] = node.children_bounding_size[1];
-            },
-            else => |strat| assert(strat.is_pre_order()),
-        }
+        resolve_size_post_order(maybe_parent, node);
     }
 };
 
@@ -784,7 +892,14 @@ pub fn main() !void {
 
     try RendererContet.init(&ctx, &renderer, Renderer.render, "RSS Reader", 1920, 1024, gpa);
 
+    UI.prev_pixel_scale = ctx.pixel_scale;
+
     while (!ctx.window_should_close()) {
         ctx.render();
     }
+}
+
+pub const SMOOTH_SPD = 50;
+pub fn exp_smooth(x: f32, target: f32, dt: f32) f32 {
+    return x + (target - x) * (1 - @exp(-dt * SMOOTH_SPD));
 }
