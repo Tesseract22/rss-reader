@@ -45,7 +45,7 @@ const UI = struct {
         // const yoffset = 0.1*ctx.cal_font_h(0.5);
         ctx.draw_text(.{ botleft[0], botleft[1] + (size[1]-ctx.cal_font_h(font_size))/2 }, font_size, text, .white);
         ctx.draw_rect_lines(botleft, size, 5, .from_u32(0xffffff30));
-        return within and ctx.mouse_left;
+        return within and ctx.is_mouse_released(.mouse_left);
     }
 
     fn within_rect(p: Vec2, botleft: Vec2, size: Vec2) bool {

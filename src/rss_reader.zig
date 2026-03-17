@@ -11,7 +11,6 @@ const parser = @import("xml_parser.zig");
 
 const gl = @import("gl");
 const Vec2 = gl.Vec2;
-const c = gl.c;
 
 const RGBA = gl.RGBA;
 
@@ -321,9 +320,8 @@ pub const UI = struct {
     pub var tmp_arena: Allocator = undefined; // @init_on_main
 
     pub var prev_pixel_scale: f32 = undefined; // @init_on_main
+                                               //
                                                
-    pub var font: gl.Font.Dynamic = undefined; // @init_on_main
-
     flags: std.EnumSet(Flag) = std.EnumSet(Flag).initEmpty(),
 
     children: std.ArrayList(*UI) = .empty,
@@ -458,6 +456,7 @@ pub const UI = struct {
         scissor,
         button,
         animated,
+        focusable,
     };
 
     pub const MouseState = enum {
@@ -545,12 +544,12 @@ pub const UI = struct {
         var mouse_state = std.EnumSet(MouseState).initEmpty();
         const hover = mouse_within_rect(box);
         mouse_state.setPresent(.Hover, hover);
-        mouse_state.setPresent(.Clicked, hover and ctx.mouse_left);
-        mouse_state.setPresent(.Down, hover and c.RGFW_isMouseDown(c.RGFW_mouseLeft) == 1);
+        mouse_state.setPresent(.Clicked, hover and ctx.is_mouse_released(.mouse_left));
+        mouse_state.setPresent(.Down, hover and ctx.is_mouse_down(.mouse_left));
         return mouse_state;
     }
 
-    // better hashing strategies
+    // TODO: disable the button if it is outside of the box the parent (that has scissor enabled)
     pub fn text_btn(content: []const u8, opts: UIOptions) bool {
         const ui = new_default();     
         set_opts(ui, opts);
@@ -563,7 +562,7 @@ pub const UI = struct {
 
         const prev_ui = prev_hash.get(content) orelse return false;
         
-        ui.mouse_state = handle_btn(.from_topleft(prev_ui.resolved_origin, prev_ui.resolved_size));
+        ui.mouse_state = handle_btn(prev_ui.get_border_box());
         return ui.mouse_state.contains(.Clicked);
     }
 
@@ -585,6 +584,7 @@ pub const UI = struct {
     pub var root_layout: *UI = undefined; // @init_on_main
 
     pub fn push_layout(axis: Axis, str_hash: []const u8, opts: UIOptions) *UI {
+        assert(str_hash.len != 0);
         const layout = new_default();
         layout.set_opts(opts);
         layout.flags.setPresent(.layout, true);
@@ -630,7 +630,7 @@ pub const UI = struct {
                 const scroll_bar = layout.get_scroll_bar_box(box);
                 layout.mouse_state = handle_btn(scroll_bar);
                 if (prev_layout.mouse_state.contains(.Down)){
-                    if (mouse_within_rect(box) and c.RGFW_isMouseDown(c.RGFW_mouseLeft) == 1) {
+                    if (mouse_within_rect(box) and ctx.is_mouse_down(.mouse_left)) {
                         layout.mouse_state.setPresent(.Down, true);
                     }
                 }

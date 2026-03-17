@@ -8,7 +8,6 @@ const parser = @import("xml_parser.zig");
 
 const gl = @import("gl");
 const Vec2 = gl.Vec2;
-const c = gl.c;
 
 const RGBA = gl.RGBA;
 
@@ -467,7 +466,6 @@ const UI = struct {
                 }
 
                 if (std.math.approxEqAbs(f32, ui.expand_anim.x, 0, 0.001)) ui.selected_post = INVALID_INDEX;
-                // gl.c.RGFW_writeClipboard(post.link.ptr, @intCast(post.link.len));
             } 
 
         }
@@ -477,9 +475,9 @@ const UI = struct {
         ctx.draw_rect_lines(main_box.botleft, main_box.size, 1, .yellow);
 
         if (ui.inside_input_box)
-            _ = gl.c.RGFW_window_setMouseStandard(ctx.window, gl.c.RGFW_mouseIbeam)
+            ctx.set_mouse_standard(.mouse_ibeam)
         else
-            _ = gl.c.RGFW_window_setMouseStandard(ctx.window, gl.c.RGFW_mouseNormal);
+            ctx.set_mouse_standard(.mouse_normal);
 
 
         flush(ctx);
@@ -589,7 +587,7 @@ const UI = struct {
         const within = within_rect(ctx.mouse_pos_gl, box);
         const bg_color: RGBA = 
             if (within)
-                if (gl.c.RGFW_isMouseDown(gl.c.RGFW_mouseLeft) == 1)
+                if (ctx.is_mouse_down(.mouse_left))
                     .from_u32(0x00000030)
                 else
                     .from_u32(0xffffff30)
@@ -605,7 +603,7 @@ const UI = struct {
             .bg_color = bg_color,
         });
 
-        return within and gl.c.RGFW_isMouseReleased(gl.c.RGFW_mouseLeft) == 1;
+        return within and ctx.is_mouse_released(.mouse_left);
     }
 
     fn button(ctx: *UIContext, box: Box, font_size: f32, text: []const u8, alignment: TextAlignment) bool {
@@ -625,7 +623,7 @@ const UI = struct {
         ctx.user_data.inside_input_box = ctx.user_data.inside_input_box or within;
 
         
-        if (ctx.mouse_left)
+        if (ctx.is_mouse_released(.mouse_left))
             input.focused = within;
 
         if (input.focused) {
@@ -639,7 +637,7 @@ const UI = struct {
             if (new_chars_ct > 0)
                 input.set_dirty();
 
-            if (gl.c.RGFW_isKeyDown(gl.c.RGFW_backSpace) == 1) {
+            if (ctx.is_key_down(.backSpace)) {
                 for (0..ctx.user_data.repeat(dt)) |_| {
                     if (input.content.items.len == 0) break;
                     input.content.shrinkRetainingCapacity(input.content.items.len-1);
@@ -657,10 +655,10 @@ const UI = struct {
             }
 
             // Cursor movement
-            if (gl.c.RGFW_isKeyPressed(gl.c.RGFW_left) == 1 and input.cursor > 0) {
+            if (ctx.is_key_pressed(.left) and input.cursor > 0) {
                 input.cursor -= 1;
             }
-            if (gl.c.RGFW_isKeyPressed(gl.c.RGFW_right) == 1 and input.cursor < input.content.items.len) {
+            if (ctx.is_key_pressed(.right) and input.cursor < input.content.items.len) {
                 input.cursor += 1;
             }
 
@@ -696,7 +694,7 @@ const UI = struct {
 
         // update scroll from inputs
         if (mouse_within_rect(ctx, scroll_bar)) {
-            scroll.clicked = c.RGFW_isMousePressed(c.RGFW_mouseLeft) == 1 or scroll.clicked;
+            scroll.clicked = ctx.is_mouse_pressed(.mouse_left) or scroll.clicked;
         }
 
         if (scroll.clicked) {
@@ -708,7 +706,7 @@ const UI = struct {
                 2,
                 .{ .r = 0xff, .g = 0xff, .b = 0, .a = 0xdf },
             );
-            if (c.RGFW_isMouseReleased(c.RGFW_mouseLeft) == 1) scroll.clicked = false;
+            if (ctx.is_mouse_released(.mouse_left)) scroll.clicked = false;
         } else {
             ctx.draw_rect_lines(
                 scroll_bar.botleft,
@@ -719,8 +717,8 @@ const UI = struct {
         }
         // draw_text(ctx, .{0, 0}, 1, ctx.input_chars.items, .white);
 
-        if (gl.c.RGFW_isKeyDown(gl.c.RGFW_up) == 1) scroll.scroll -= scroll_spd * dt / scroll_h;
-        if (gl.c.RGFW_isKeyDown(gl.c.RGFW_down) == 1) scroll.scroll += scroll_spd * dt / scroll_h;
+        if (ctx.is_key_down(.up)) scroll.scroll -= scroll_spd * dt / scroll_h;
+        if (ctx.is_key_down(.down)) scroll.scroll += scroll_spd * dt / scroll_h;
         scroll.scroll -= ctx.mouse_scroll[1] * dt * 10 * scroll_spd / scroll_h;
         scroll.scroll = std.math.clamp(scroll.scroll, 0, (scroll_h-box.size[1])/scroll_h);
 
