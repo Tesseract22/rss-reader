@@ -49,7 +49,7 @@ const Renderer = struct {
     pub fn render(_: *RendererContet) void {
         const self = ctx.user_data;
         _ = self;
-       
+        UI.resolve_input_event(); 
         UI.render();
 
         UI.resolve_layout();
@@ -80,9 +80,10 @@ const Renderer = struct {
 
     pub fn render_ui() void {
         render_ui_impl(UI.get_root_layout());
+        render_ui_hightlight(UI.get_root_layout());
     }
 
-    fn draw_btn_overlay(mouse_state: std.EnumSet(UI.MouseState), box: Box) void {
+    fn draw_btn_effects(mouse_state: UI.EventSet, box: Box) void {
         if (mouse_state.contains(.Down)) {
             draw_rect(box.botleft, box.size, .from_u32(0x00000030));
         } else if (mouse_state.contains(.Hover)) {
@@ -119,7 +120,7 @@ const Renderer = struct {
         if (node.flags.contains(.y_scroll) and node.should_enable_scroll()) {
             // Scroll bar background
             draw_rect(.{ box.x_right()-UI.get_scroll_bar_w(), box.botleft[1] }, .{ UI.get_scroll_bar_w(), box.size[1] }, .from_u32(0xefefefff));
-            const scroll_bar = node.get_scroll_bar_box(box);
+            const scroll_bar = node.get_scroll_bar_box();
 
             // Scroll bar
             draw_rect(
@@ -127,13 +128,25 @@ const Renderer = struct {
                 scroll_bar.size,
                 .from_u32(0x3f3f3fff));
             draw_rect_lines(scroll_bar.botleft, scroll_bar.size, 2.5, node.border_color);
-            draw_btn_overlay(node.mouse_state, scroll_bar);
+            draw_btn_effects(node.scroll_mouse_event, scroll_bar);
         }
         
         draw_rect_lines(box.botleft, box.size, node.border_width, node.border_color);
         // const outer = node.get_outer_box();
         // draw_rect_lines(outer.botleft, outer.size, node.border_width, .white);
-        if (node.flags.contains(.button)) draw_btn_overlay(node.mouse_state, box);
+        if (node.flags.contains(.button)) draw_btn_effects(node.mouse_event, box);
+    }
+
+    fn render_ui_hightlight(node: *UI) void {
+        const box = node.get_border_box();
+        if (node.mouse_event.contains(.Focused)) 
+            draw_rect_lines(box.botleft, box.size, node.border_width, .yellow);
+        if (node.flags.contains(.layout)) {
+            for (node.children.items) |child| {
+                render_ui_hightlight(child);
+            }
+        }
+
     }
 
     fn append_state(ct: usize) void {
@@ -307,6 +320,8 @@ pub const UI = struct {
         }
     };
 
+    pub const EventSet = std.EnumSet(MouseEvent);
+
     pub var key_hash: [2]std.StringHashMap(*UI) = undefined; // @init_on_main
     pub var curr_hash: *std.StringHashMap(*UI) = undefined; // @init_on_main
     pub var prev_hash: *std.StringHashMap(*UI) = undefined; // @init_on_main
@@ -320,9 +335,9 @@ pub const UI = struct {
     pub var tmp_arena: Allocator = undefined; // @init_on_main
 
     pub var prev_pixel_scale: f32 = undefined; // @init_on_main
-                                               //
+    
                                                
-    flags: std.EnumSet(Flag) = std.EnumSet(Flag).initEmpty(),
+    flags: std.EnumSet(Flag) = .initEmpty(),
 
     children: std.ArrayList(*UI) = .empty,
     text_content: []const u8 = "",
@@ -346,16 +361,39 @@ pub const UI = struct {
     target_size: Vec2 = .{ 0, 0 }, 
     resolved_origin: Vec2 = .{ 0, 0 }, // for now, the origin of a box is its topleft corner
 
-    mouse_state: std.EnumSet(MouseState) = .initEmpty(),
+    mouse_event: EventSet = .initEmpty(),
+    scroll_mouse_event: EventSet = .initEmpty(),
+
+    // UI logic state
+    pub var selected_post_id: []const u8 = "";
+
+
+    // How to implement focused element:
+    //
+    // Premise: only one (or zero) focused element at all time
+    //
+    // 1. Have a global pointer to the focused UI element.
+    //    When creating a focusable element, set the pointer to the current element if it is clicked, similar to how
+    //    button works (using last frame's data). As such, element deeper in the UI tree should essentially take percedence to its parent.
+    //
+    // 2. Instead of have a global pointer, put a `is_focused` flag on each element. When a child is focused, it needs to
+    //    travel upward to all of its parent and unset all their `is_focused` flag.
+    //
+    // None of the above method provides accurate information about whether a element is focused DURING build time.
+    // 
+    // 3. (Current approach) Run a entire event system on previous frame's UI tree. Considering only mouse event, the algo goes as follow:
+    //
+    // 3a. Start from the root.
+    // 3b. Test if the mouse is within the current element. If yes, recurive into the children.
+    // 3c. The childrne should return its `is_focused`. If any of the children is focused, the parent should not be marked as focused
+    // 3d. Otherwise, mark the current element as focused.
+    // 3e. Next frame's UI tree should inherits `is_focused` from the previous frame, and use that during build time.
 
     const COLOR1 = RGBA.from_u32(0x1b211aff);
     const COLOR2 = RGBA.from_u32(0x547792ff);
 
-    //
-    // UI Logic Staate
-    //
-    pub var selected_post_id: [:0]const u8 = "";
 
+    // UI Builder
     pub fn render() void {
         ctx.clear(.from_u32(0x303030ff));
         {
@@ -442,7 +480,7 @@ pub const UI = struct {
         margin: Vec2 = .{ 0, 0 },
         w_strategy: SizeStrategy = .fit_text,
         h_strategy: SizeStrategy = .fit_text,
-        flags: std.EnumSet(Flag) = std.EnumSet(Flag).initEmpty(),
+        flags: std.EnumSet(Flag) = .initEmpty(),
     };
 
     pub const Axis = enum(u8) {
@@ -459,10 +497,11 @@ pub const UI = struct {
         focusable,
     };
 
-    pub const MouseState = enum {
+    pub const MouseEvent = enum {
         Hover,
         Down,
         Clicked,
+        Focused,
     };
 
     // the result is invalidated the next time tmp_fmt is called
@@ -540,16 +579,17 @@ pub const UI = struct {
         ui.add_to_layout();
     }
 
-    pub fn handle_btn(box: Box) std.EnumSet(MouseState) {
-        var mouse_state = std.EnumSet(MouseState).initEmpty();
+    // FIXME: hacky function
+    pub fn handle_mouse(box: Box) EventSet {
+        var mouse_state = EventSet.initEmpty();
         const hover = mouse_within_rect(box);
         mouse_state.setPresent(.Hover, hover);
         mouse_state.setPresent(.Clicked, hover and ctx.is_mouse_released(.mouse_left));
         mouse_state.setPresent(.Down, hover and ctx.is_mouse_down(.mouse_left));
+        mouse_state.setPresent(.Focused, mouse_state.contains(.Clicked));
         return mouse_state;
     }
 
-    // TODO: disable the button if it is outside of the box the parent (that has scissor enabled)
     pub fn text_btn(content: []const u8, opts: UIOptions) bool {
         const ui = new_default();     
         set_opts(ui, opts);
@@ -562,8 +602,8 @@ pub const UI = struct {
 
         const prev_ui = prev_hash.get(content) orelse return false;
         
-        ui.mouse_state = handle_btn(prev_ui.get_border_box());
-        return ui.mouse_state.contains(.Clicked);
+        ui.mouse_event = prev_ui.mouse_event;
+        return ui.mouse_event.contains(.Clicked);
     }
 
     fn new_default() *UI {
@@ -581,7 +621,8 @@ pub const UI = struct {
     // Layout
     //
     pub var layouts_stack: std.ArrayList(*UI) = .empty;
-    pub var root_layout: *UI = undefined; // @init_on_main
+    pub var prev_root_layout: ?*UI = null;
+    pub var root_layout: *UI = undefined;
 
     pub fn push_layout(axis: Axis, str_hash: []const u8, opts: UIOptions) *UI {
         assert(str_hash.len != 0);
@@ -610,31 +651,26 @@ pub const UI = struct {
         const layout = push_layout(.Y, str_hash, opts);
         layout.flags.setPresent(.y_scroll, true);
         layout.flags.setPresent(.scissor, true);
+        layout.flags.setPresent(.focusable, true);
 
         if (prev_hash.get(str_hash)) |prev_layout| {
             layout.scroll_offset = prev_layout.scroll_offset;
             layout.children_bounding_size = prev_layout.children_bounding_size;
             layout.resolved_origin = prev_layout.resolved_origin;
+            layout.mouse_event = prev_layout.mouse_event;
+            layout.scroll_mouse_event = prev_layout.scroll_mouse_event;
             // layout.resolved_size = prev_layout.resolved_size; // TODO: handle target_resolved_size
 
             const scroll_h = layout.children_bounding_size[1];
             const display_h = prev_layout.resolved_size[1];
             if (scroll_h > display_h) {
                 // TODO: arrow key?
-                // TODO: only do this when focused
                 // handlem mouse scroll
-                layout.scroll_offset -= ctx.mouse_scroll[1] * dt * 30 * scroll_spd / scroll_h;
+                if (layout.mouse_event.contains(.Focused))
+                    layout.scroll_offset -= ctx.mouse_scroll[1] * dt * 30 * scroll_spd / scroll_h;
 
                 // handle dragging scroll bar
-                const box = Box.from_topleft(prev_layout.resolved_origin, prev_layout.resolved_size);
-                const scroll_bar = layout.get_scroll_bar_box(box);
-                layout.mouse_state = handle_btn(scroll_bar);
-                if (prev_layout.mouse_state.contains(.Down)){
-                    if (mouse_within_rect(box) and ctx.is_mouse_down(.mouse_left)) {
-                        layout.mouse_state.setPresent(.Down, true);
-                    }
-                }
-                if (layout.mouse_state.contains(.Down)) {
+                if (layout.scroll_mouse_event.contains(.Down)) {
                     layout.scroll_offset += ctx.mouse_delta[1]/display_h; 
                 }
 
@@ -657,11 +693,12 @@ pub const UI = struct {
         return scroll_bar_h;
     }
 
-    pub fn get_scroll_bar_box(node: *const UI, box: Box) Box {
+    pub fn get_scroll_bar_box(node: *const UI) Box {
+        const border = node.get_border_box();
         const scroll_bar_h = node.get_scroll_bar_h();
         const scroll_bar_w = get_scroll_bar_w();
         const scroll_bar = Box {
-            .botleft = .{ box.x_right()-scroll_bar_w, box.y_top() - node.scroll_offset*box.size[1]-scroll_bar_h },
+            .botleft = .{ border.x_right()-scroll_bar_w, border.y_top() - node.scroll_offset*border.size[1]-scroll_bar_h },
             .size =.{ scroll_bar_w, scroll_bar_h },
         };
         return scroll_bar;
@@ -698,6 +735,9 @@ pub const UI = struct {
         curr_arena = curr_arena_state.allocator();
         prev_arena = prev_arena_state.allocator();
 
+        prev_root_layout = root_layout;
+        root_layout = undefined;
+
         layouts_stack.clearRetainingCapacity();
     }
 
@@ -712,6 +752,53 @@ pub const UI = struct {
         node.resolved_origin = v2add(node.resolved_origin, offset);
         for (node.children.items) |child|
             offset_origin_recursive(child, offset);
+    }
+
+    // TODO: move this into zig2d?
+    fn screen_box() Box {
+        return .{
+            .botleft = .{ ctx.x_left(), ctx.y_bot() },
+            .size = .{ ctx.screen_w(), ctx.screen_h() },
+        };
+    }
+
+    fn resolve_input_event() void {
+        _ = resolve_input_event_impl(prev_root_layout orelse return, screen_box());
+    }
+
+    fn resolve_input_event_impl(node: *UI, _: Box) bool {
+        const is_focused = node.mouse_event.contains(.Focused);
+        node.mouse_event = .initEmpty();
+        node.mouse_event.setPresent(.Focused, is_focused and !ctx.is_mouse_released(.mouse_left));
+        // FIXME: use scissor?
+        // const border = node.get_border_box().intersect(parent_border) orelse return;
+        const border = node.get_border_box();
+        node.mouse_event.setUnion(handle_mouse(border));
+        if (!node.flags.contains(.focusable)) node.mouse_event.setPresent(.Focused, false);
+        if (node.flags.contains(.y_scroll)) {
+            node.scroll_mouse_event = .initEmpty();
+            node.scroll_mouse_event.setUnion(handle_mouse(node.get_scroll_bar_box()));
+        }
+        if (!node.mouse_event.contains(.Hover)) return false;
+
+        // the event of the child can affect that of its parent in one of two ways:
+        // 
+        // 1. the child trumps the parent, i.e. when child is hovered, parent is not.
+        // 2. no effect
+        // 3. propagate upwards
+        var event_stop = EventSet.initFull();
+        event_stop.setPresent(.Focused, false);
+
+        var child_focused = false;
+        for (node.children.items) |child| {
+            child_focused |= resolve_input_event_impl(child, border);
+            node.mouse_event.setIntersection(child.mouse_event.intersectWith(event_stop).complement());
+        }
+        
+        if (child_focused) {
+            node.mouse_event.setPresent(.Focused, false);
+        }
+        return child_focused or node.mouse_event.contains(.Focused);
     }
 
     fn resolve_size_from_target(node: *UI, axis: Axis) void {
