@@ -30,6 +30,15 @@ pub fn v2pixels(a: Vec2) Vec2 {
     return .{ ctx.pixels(a[0]), ctx.pixels(a[1]) };
 }
 
+pub fn v2eq(a: Vec2, b: Vec2) bool {
+    return a[0] == b[0] and a[1] == b[1];
+}
+
+pub fn v2eq_approx(a: Vec2, b: Vec2) bool {
+    return std.math.approxEqAbs(f32, a[0], b[0], 0.0001) and 
+    std.math.approxEqAbs(f32, a[1], b[1], 0.0001);
+}
+
 const Renderer = struct {
     pub var batches: std.ArrayList([4]gl.BaseVertexData) = .empty;
     pub var batches_state: std.ArrayList(struct { BatchState, u64 }) = .empty;
@@ -360,6 +369,7 @@ pub const UI = struct {
     resolved_size: Vec2 = .{ 0, 0 }, // this includes padding and margin
     target_size: Vec2 = .{ 0, 0 }, 
     resolved_origin: Vec2 = .{ 0, 0 }, // for now, the origin of a box is its topleft corner
+    anim_completed: bool = false,
 
     mouse_event: EventSet = .initEmpty(),
     scroll_mouse_event: EventSet = .initEmpty(),
@@ -641,6 +651,7 @@ pub const UI = struct {
         curr_hash.putNoClobber(str_hash, layout) catch unreachable;
         if (prev_hash.get(str_hash)) |prev_layout| {
             layout.resolved_size = prev_layout.resolved_size; // TODO: handle target_resolved_size
+            layout.anim_completed = prev_layout.anim_completed;
         }
         return layout;
     }
@@ -746,8 +757,6 @@ pub const UI = struct {
         resolve_layout_impl(null, root);
     }
 
-    pub var diff_max: f32 = 0;
-
     fn offset_origin_recursive(node: *UI, offset: Vec2) void {
         node.resolved_origin = v2add(node.resolved_origin, offset);
         for (node.children.items) |child|
@@ -802,8 +811,11 @@ pub const UI = struct {
     }
 
     fn resolve_size_from_target(node: *UI, axis: Axis) void {
-        if (node.flags.contains(.animated)) {
+        if (node.flags.contains(.animated) and !node.anim_completed) {
             node.resolved_size[@intFromEnum(axis)] = exp_smooth(node.resolved_size[@intFromEnum(axis)], node.target_size[@intFromEnum(axis)], ctx.get_delta_time());
+            if (v2eq_approx(node.resolved_size, node.target_size)) {
+                node.anim_completed = true;
+            }
         } else {
             node.resolved_size[@intFromEnum(axis)] = node.target_size[@intFromEnum(axis)];
         }
