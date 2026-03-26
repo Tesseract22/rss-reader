@@ -48,6 +48,11 @@ pub fn build(b: *std.Build) void {
     rss_reader_mod.addImport("xml", zig_xml.module("xml"));
     rss_reader_mod.addImport("sqlite", zig_sqlite.module("sqlite"));
     rss_reader_mod.addImport("gl", zig2d.module("gl"));
+    rss_reader_mod.addCSourceFile(.{
+        .file = b.path("thirdparty/strptime/LibOb_strptime.c"),
+    });
+    rss_reader_mod.addIncludePath(b.path("."));
+
 
 
     xml_ref_mod.addImport("xml", zig_xml.module("xml"));

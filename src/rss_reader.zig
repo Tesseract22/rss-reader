@@ -6,7 +6,7 @@ const log = std.log;
 
 const xml = @import("xml");
 
-const Sqlite = @import("sqlite.zig");
+const DB = @import("sqlite.zig");
 const parser = @import("xml_parser.zig");
 
 const gl = @import("gl");
@@ -71,7 +71,7 @@ const Renderer = struct {
         var text_buf: [64]u8 = undefined;
 
         const frame_time_text = std.fmt.bufPrint(&text_buf, "frame time: {d:.5}ms", .{ ctx.get_delta_time() * 1000 }) catch unreachable;
-        draw_text(.{ ctx.x_right()-0.25, ctx.y_top()-ctx.cal_font_h(1) },  0.3, frame_time_text, .white);
+        draw_text(.{ ctx.x_right()-0.25, ctx.y_top()-ctx.cal_font_h(1) },  0.3, frame_time_text, UI.TEXT_COLOR);
 
         if (frame_time_sum >= fps_avg_frame_time) {
             fps = @as(f32, @floatFromInt(counter)) / frame_time_sum;
@@ -88,8 +88,11 @@ const Renderer = struct {
     }
 
     pub fn render_ui() void {
+        ctx.set_mouse_standard(UI.mouse_icon);
+        assert(scissor_stack.items.len == 0);
+        scissor_stack.clearRetainingCapacity();
+
         render_ui_impl(UI.get_root_layout());
-        render_ui_hightlight(UI.get_root_layout());
     }
 
     fn draw_btn_effects(mouse_state: UI.EventSet, box: Box) void {
@@ -99,23 +102,23 @@ const Renderer = struct {
             draw_rect(box.botleft, box.size, .from_u32(0xffffff30));
         }
        if (mouse_state.contains(.Hover) or mouse_state.contains(.Down)) 
-            draw_rect_lines(box.botleft, box.size, 2.5, .white);
+            draw_rect_lines(box.botleft, box.size, UI.BORDER_THICKNESS, .white);
     }
 
     fn render_ui_impl(node: *const UI) void {
         const box = node.get_border_box();
         draw_rect(box.botleft, box.size, node.bg_color);
+        draw_rect_lines(box.botleft, box.size, node.border_width, node.border_color);
 
 
-        render_content: {
+        {
             if (node.flags.contains(.scissor)) {
-                flush();
-                if (!push_scissor(box)) break :render_content;
+                push_scissor(box);
             }
 
             if (node.flags.contains(.layout)) {
                 for (node.children.items) |child| {
-                    render_ui_impl(child);
+                    if (!child.flags.contains(.absolute)) render_ui_impl(child);
                 }
             } else {
                 draw_text(v2add(box.botleft, v2pixels(node.padding)), node.font_scale, node.text_content, .white);
@@ -126,36 +129,43 @@ const Renderer = struct {
             }
         }
 
+        if (node.flags.contains(.input_box)) {
+            const tw = ctx.text_width(node.font_scale, node.text_content[0..node.input.cursor]);
+            const content_box = node.get_content_box();
+            const end_of_text = content_box.botleft[0] + tw;
+            const cursor_box = Box.from_centerleft(
+                .{ end_of_text, content_box.botleft[1] + content_box.size[1]/2 },
+                .{ ctx.pixels(3), content_box.size[1] * 0.9 });
+            if (node.events.contains(.Focused)) draw_rect(cursor_box.botleft, cursor_box.size, .from_u32(0x7f7f7fff));
+
+        }
         if (node.flags.contains(.y_scroll) and node.should_enable_scroll()) {
             // Scroll bar background
-            draw_rect(.{ box.x_right()-UI.get_scroll_bar_w(), box.botleft[1] }, .{ UI.get_scroll_bar_w(), box.size[1] }, .from_u32(0xefefefff));
+            draw_rect(.{ box.x_right()-UI.get_scroll_bar_w(), box.botleft[1] }, .{ UI.get_scroll_bar_w(), box.size[1] }, UI.TEXT_COLOR );
             const scroll_bar = node.get_scroll_bar_box();
 
             // Scroll bar
             draw_rect(
                 scroll_bar.botleft,
                 scroll_bar.size,
-                .from_u32(0x3f3f3fff));
-            draw_rect_lines(scroll_bar.botleft, scroll_bar.size, 2.5, node.border_color);
+                UI.COLOR1);
+            draw_rect_lines(scroll_bar.botleft, scroll_bar.size, node.border_width, node.border_color);
             draw_btn_effects(node.scroll_mouse_event, scroll_bar);
         }
-        
-        draw_rect_lines(box.botleft, box.size, node.border_width, node.border_color);
-        // const outer = node.get_outer_box();
-        // draw_rect_lines(outer.botleft, outer.size, node.border_width, .white);
-        if (node.flags.contains(.button)) draw_btn_effects(node.mouse_event, box);
-    }
-
-    fn render_ui_hightlight(node: *UI) void {
-        const box = node.get_border_box();
-        if (node.mouse_event.contains(.Focused)) 
-            draw_rect_lines(box.botleft, box.size, node.border_width, .yellow);
-        if (node.flags.contains(.layout)) {
-            for (node.children.items) |child| {
-                render_ui_hightlight(child);
-            }
+        if (node.flags.contains(.disabled)) {
+            draw_rect(box.botleft, box.size, .from_u32(0xffffff7f));
         }
 
+        if (node.flags.contains(.layout)) {
+            for (node.children.items) |child| {
+                if (child.flags.contains(.absolute)) render_ui_impl(child);
+            }
+        }
+        // const outer = node.get_outer_box();
+        // draw_rect_lines(outer.botleft, outer.size, node.border_width, .white);
+        if (node.flags.contains(.button)) draw_btn_effects(node.events, box);
+        if (node.events.contains(.Focused))
+            draw_rect_lines(box.botleft, box.size, node.border_width, node.focus_border_color);
     }
 
     fn append_state(ct: usize) void {
@@ -181,9 +191,10 @@ const Renderer = struct {
     }
 
     fn draw_rect_lines(botleft: Vec2, size: Vec2, thickness: f32, rgba: RGBA) void {
+        const border2 = Vec2 { ctx.pixels(thickness), ctx.pixels(thickness) };
         switch_or_append_state(
             .{ .tex = ctx.white_tex, .border_thickness = thickness, .shader = ctx.base_shader_pgm }, 1); 
-        batches.append(gpa, ctx.make_rect_vertex_data(botleft, size, rgba)) catch unreachable;
+        batches.append(gpa, ctx.make_rect_vertex_data(v2add(botleft, border2), v2sub(size, v2scal(border2, 1)), rgba)) catch unreachable;
     }
 
     // TODO: handle text overflow
@@ -210,21 +221,20 @@ const Renderer = struct {
 
     // return false if the new scissor does not overlap with the last scissor at all,
     // and thus all drawing can be skipped
-    fn push_scissor(box: Box) bool {
+    fn push_scissor(box: Box) void {
         flush();
         const new_scissor = if (scissor_stack.getLastOrNull()) |top|
-            top.intersect(box) orelse return false
+            top.intersect(box) orelse Box { .botleft = .{ 0, 0 }, .size = .{ 0, 0 } }
         else 
             box;
 
         ctx.begin_scissor_gl_coord(new_scissor.botleft, new_scissor.size);
-        scissor_stack.append(UI.curr_arena, new_scissor) catch @panic("OOM");
-        return true;
+        scissor_stack.append(gpa, new_scissor) catch @panic("OOM");
     }
 
     fn pop_scissor() void {
         flush();
-        _ = scissor_stack.pop().?;
+        _ = scissor_stack.pop();
         if (scissor_stack.getLastOrNull()) |top| {
             ctx.begin_scissor_gl_coord(top.botleft, top.size);
         } else {
@@ -301,17 +311,27 @@ const Box = struct {
     // return a text_offset that defines the offset from the botleft of the box where text should be drawn
 };
 
-fn find_channel_by_id(channel: u32) Sqlite.ChannelWithId {
+fn find_channel_by_id(channel: u32) DB.ChannelWithId {
     for (channels) |ch| {
         if (ch.rowid == channel) return ch;     
     } else return .{ .rowid = std.math.maxInt(u32), .title = "unknown" };
 }
 
+// TODO: implement the following functionalities:
+// * Mark a post as read.
+// * Add new channel
+// * Filter post
+//   * By channel
+//   * By title
+//   * By already read or not
+//
 
+// TODO: ability to focus a UI element on creation
 pub const UI = struct {
     pub const SizeStrategy = union(enum) {
         // pre-order
         fixed_in_pixels: f32,
+        fixed_in_normalized: f32,
         span_screen,
         // parent must also be pre-order
         parent_perct: f32,
@@ -344,8 +364,12 @@ pub const UI = struct {
     pub var tmp_arena: Allocator = undefined; // @init_on_main
 
     pub var prev_pixel_scale: f32 = undefined; // @init_on_main
-    
-                                               
+  
+    pub var force_focus_on: []const u8 = "";
+
+    pub var mouse_icon = RendererContet.MouseIcon.mouse_normal;
+               
+    str_hash: []const u8 = "",
     flags: std.EnumSet(Flag) = .initEmpty(),
 
     children: std.ArrayList(*UI) = .empty,
@@ -353,9 +377,11 @@ pub const UI = struct {
     font_scale: f32 = 1,
     bg_color: RGBA = COLOR1,
     border_color: RGBA = COLOR2,
+    focus_border_color: RGBA = TEXT_COLOR,
     border_width: f32 = 2,
     padding: Vec2 = .{ 0, 0 },
     margin: Vec2 = .{ 0, 0 },
+    abs_offset: Vec2 = .{ 0, 0 },
 
     w_strategy: SizeStrategy = .fit_text,
     h_strategy: SizeStrategy = .fit_text,
@@ -371,11 +397,37 @@ pub const UI = struct {
     resolved_origin: Vec2 = .{ 0, 0 }, // for now, the origin of a box is its topleft corner
     anim_completed: bool = false,
 
-    mouse_event: EventSet = .initEmpty(),
+    events: EventSet = .initEmpty(),
     scroll_mouse_event: EventSet = .initEmpty(),
+
+    input: struct {
+        storage: std.ArrayList(u8) = .empty,
+        cursor: u32 = 0,
+        dirty: bool = false,
+        dirty_t: f32 = 0,
+        repeat_t: f32 = 0,
+
+
+        const Input = @This();
+        pub fn set_dirty(input: *Input) void {
+            input.dirty = true;
+            input.dirty_t = 0;
+        }
+
+        // pub fn unset_dirty(input: *Input) void {
+        //     input.dirty = false;
+        //     input.dirty_t = 0;
+        // }
+
+        const DIRTY_DELAY = 0.2;
+        pub fn is_dirty(input: *Input) bool {
+            return input.dirty and input.dirty_t >= DIRTY_DELAY;
+        }
+    } = .{},
 
     // UI logic state
     pub var selected_post_id: []const u8 = "";
+    pub var add_url_status: []const u8 = " ";
 
 
     // How to implement focused element:
@@ -399,18 +451,70 @@ pub const UI = struct {
     // 3d. Otherwise, mark the current element as focused.
     // 3e. Next frame's UI tree should inherits `is_focused` from the previous frame, and use that during build time.
 
-    const COLOR1 = RGBA.from_u32(0x1b211aff);
-    const COLOR2 = RGBA.from_u32(0x547792ff);
+    const GAMMA = 1.2;
+    const COLOR1 = RGBA.from_u32(0x37353eff).gamma(GAMMA);
+    const COLOR2 = RGBA.from_u32(0x44444eff).gamma(GAMMA);
+    const COLOR3 = RGBA.from_u32(0x715a5aff).gamma(GAMMA);
+    const COLOR4 = RGBA.from_u32(0xffdab3ff).gamma(GAMMA);
+
+    const TEXT_COLOR = RGBA.from_u32(0xd3dad9ff).gamma(GAMMA);
+
+    const BORDER_THICKNESS = 3;
+
+    var display_add_popup = false;
 
 
     // UI Builder
     pub fn render() void {
         ctx.clear(.from_u32(0x303030ff));
         {
-            _ = push_layout(.Y, "outer", .{ .w_strategy = .span_screen, .h_strategy = .span_screen });
-            text("Header", .{ .padding = .{ 10, 10 }, .w_strategy = .rest_of_parent });
+            _ = push_layout(.Y, "#outer", .{ .w_strategy = .span_screen, .h_strategy = .span_screen });
+           
+            if (display_add_popup) {
+                const POPUP_SIZE = Vec2 { (ctx.screen_w() * 0.5) / ctx.pixel_scale, 500 };
+                const popup = push_layout(.Y, "#popup", .{ .w_strategy = .{ .fixed_in_pixels = POPUP_SIZE[0] }, .h_strategy = .fit_children, .border_color = COLOR3,
+                    .flags = .initMany(&.{.absolute, .focusable }), .abs_offset = .{ (ctx.screen_w()-ctx.pixels(POPUP_SIZE[0]))/2, (ctx.screen_h()-ctx.pixels(POPUP_SIZE[1]))/-2 }});
+                _ = popup;
+                // if (popup.mouse_event.contains(.Unfocused)) display_add_popup = false;
+                const input_enabled = 
+                    switch (db_fetch_complete.load(.acquire)) {
+                        .completed => blk: {
+                            // TODO: use arena
+                            // TODO: handle error
+                            posts = db.get_posts_all(gpa) catch unreachable;
+                            channels = db.get_channels_all(gpa) catch unreachable;
+                            db_fetch_complete.store(.idling, .release);
+                            break :blk true;
+                        },
+                        .idling => true,
+                        .fetching => false,
+                    };
+                const url = input_box("#add url text box", .{ .padding = .{ 10, 10 }, .margin = .{ 5, 5 },
+                    .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .fit_text,
+                    .font_scale = 0.5, .flags = .initMany(&.{.focus_on_create}),
+                    .bg_color = COLOR2, .border_color = TEXT_COLOR });
+                get_last().flags.setPresent(.disabled, !input_enabled);
+
+                text(frame_fmt("{s}#status text", .{ add_url_status }), .{ .font_scale = 0.3, .padding = .{ 10, 10 }, .margin = .{ 5, 5 }, 
+                    .border_color = .transparent, .w_strategy = .{ .parent_perct = 1 } });
+                if (text_btn("Confirm#add url confirm", .{ .padding = .{ 10, 10 }, .margin = .{ 5, 10 }, .font_scale = 0.5 })) {
+                    db_mutex.lock();
+                    defer db_mutex.unlock();
+                    db_fetch_complete.store(.fetching, .release);
+                    db_rss_url = url;
+                    db_cond.signal();
+                }
+                
+                pop_layout();
+            }
             {
-                _ = push_layout(.X, "main", .{ .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .rest_of_parent });
+            _ = push_layout(.X, "#header", .{ .w_strategy = .rest_of_parent, .h_strategy = .fit_children, .bg_color = COLOR3, .border_color = RGBA.from_u32(0x715a5aff).gamma(1)});
+            if (text_btn("Add#header", .{ .font_scale = 0.4, .padding = .{ 10, 10 }, .bg_color = .transparent, .border_color = RGBA.from_u32(0x715a5aff).gamma(1) }))
+                display_add_popup = true;
+            pop_layout();
+            }
+            {
+                _ = push_layout(.X, "#main", .{ .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .rest_of_parent });
                 const channel_layout = push_scroll_layout("channel_content",
                     .{ .padding = .{ 10, 10 }, .margin = .{ 10, 10 }, .w_strategy = .{ .parent_perct = 0.2 }, .h_strategy = .rest_of_parent });
                 _ = channel_layout;
@@ -433,7 +537,7 @@ pub const UI = struct {
                             .padding = .{ 10, 20 }, .margin = .{ 10, 0 },
                             .border_color = if (selected) .white else .transparent, .bg_color = if (selected) COLOR2 else .transparent,
                             .font_scale = 0.5, .w_strategy = .{ .parent_perct = 1 },
-                            .flags = .initMany(&.{ .scissor }),
+                            .flags = .initOne(.scissor),
                         })) {
                         if (selected) selected_post_id = ""
                         else selected_post_id = post.guid;
@@ -485,9 +589,11 @@ pub const UI = struct {
         font_scale: f32 = 1,
         bg_color: RGBA = COLOR1,
         border_color: RGBA = COLOR2,
+        focus_border_color: RGBA = COLOR4,
         border_width: f32 = 2,
         padding: Vec2 = .{ 0, 0 },
         margin: Vec2 = .{ 0, 0 },
+        abs_offset: Vec2 = .{ 0, 0 },
         w_strategy: SizeStrategy = .fit_text,
         h_strategy: SizeStrategy = .fit_text,
         flags: std.EnumSet(Flag) = .initEmpty(),
@@ -503,8 +609,12 @@ pub const UI = struct {
         y_scroll,
         scissor,
         button,
+        input_box,
+        disabled,
         animated,
         focusable,
+        focus_on_create,
+        absolute,
     };
 
     pub const MouseEvent = enum {
@@ -512,6 +622,7 @@ pub const UI = struct {
         Down,
         Clicked,
         Focused,
+        Unfocused,
     };
 
     // the result is invalidated the next time tmp_fmt is called
@@ -583,43 +694,101 @@ pub const UI = struct {
     }
 
     pub fn text(content: []const u8, opts: UIOptions) void {
-        const ui = new_default();     
+        const ui = new(content, opts);     
         ui.text_content = preprocess_text(content);
-        set_opts(ui, opts);
         ui.add_to_layout();
     }
 
-    // FIXME: hacky function
-    pub fn handle_mouse(box: Box) EventSet {
-        var mouse_state = EventSet.initEmpty();
-        const hover = mouse_within_rect(box);
-        mouse_state.setPresent(.Hover, hover);
-        mouse_state.setPresent(.Clicked, hover and ctx.is_mouse_released(.mouse_left));
-        mouse_state.setPresent(.Down, hover and ctx.is_mouse_down(.mouse_left));
-        mouse_state.setPresent(.Focused, mouse_state.contains(.Clicked));
-        return mouse_state;
-    }
+    // pub fn input_box(str_hash: []const u8, opts: UIOptions) void {
+
+    // }
 
     pub fn text_btn(content: []const u8, opts: UIOptions) bool {
-        const ui = new_default();     
-        set_opts(ui, opts);
+        const ui = new(content, opts);     
 
         ui.text_content = preprocess_text(content);
         ui.flags.setPresent(.button, true);
         ui.add_to_layout();
-
-        curr_hash.putNoClobber(content, ui) catch unreachable;
-
-        const prev_ui = prev_hash.get(content) orelse return false;
-        
-        ui.mouse_event = prev_ui.mouse_event;
-        return ui.mouse_event.contains(.Clicked);
+        return ui.events.contains(.Clicked);
     }
 
-    fn new_default() *UI {
-        const new_layout = curr_arena.create(UI) catch unreachable;
-        new_layout.* = UI {};
-        return new_layout;
+
+
+    // TODO: deal with utf-8
+    pub fn input_box(str_hash: []const u8, opts: UIOptions) []const u8 {
+        const ui = new(str_hash, opts);
+        ui.flags.setPresent(.focusable, true);
+        ui.flags.setPresent(.input_box, true);
+        ui.add_to_layout();
+        const dt = ctx.get_delta_time();
+        if (ui.events.contains(.Focused)) {
+            const new_chars_ct = ctx.input_chars.items.len;
+            ui.input.storage.insertSlice(gpa, ui.input.cursor, ctx.input_chars.items) catch unreachable;
+            ui.input.cursor += @intCast(new_chars_ct);
+
+            if (new_chars_ct > 0)
+                ui.input.set_dirty();
+
+            const ch_to_removed = @min(ui.input.cursor, ctx.backspace);
+            for (0..ch_to_removed) |_| {
+                _ = ui.input.storage.orderedRemove(ui.input.cursor-1);
+                ui.input.cursor -= 1;
+                ui.input.set_dirty();
+            }
+
+            if (ctx.is_key_pressed(.backSpace) and ui.input.storage.items.len != 0) {
+                // FIXME: handle backspace when cursor is not at the very right
+            }
+            if (ctx.is_paste) {
+                const buf = ctx.clipboard();
+                ui.input.storage.insertSlice(gpa, ui.input.cursor, buf) catch unreachable;
+                ui.input.cursor += @intCast(buf.len);
+
+                ui.input.set_dirty();
+            }
+
+            // Cursor movement
+            if (ctx.is_key_pressed(.left) and ui.input.cursor > 0) {
+                ui.input.cursor -= 1;
+            }
+            if (ctx.is_key_pressed(.right) and ui.input.cursor < ui.input.storage.items.len) {
+                ui.input.cursor += 1;
+            }
+        }
+
+        if (ui.input.dirty)
+            ui.input.dirty_t += dt;
+        
+        if (ui.events.contains(.Hover))
+            mouse_icon = .mouse_ibeam;
+
+        
+        ui.text_content = ui.input.storage.items;
+        return ui.text_content;
+    }
+
+    fn new(str_hash: []const u8, opts: UIOptions) *UI {
+        assert(str_hash.len != 0);
+        const ui = curr_arena.create(UI) catch unreachable;
+        ui.* = UI { .str_hash = str_hash };
+        set_opts(ui, opts);
+
+        curr_hash.putNoClobber(str_hash, ui) catch unreachable;
+        if (prev_hash.get(str_hash)) |prev_ui| {
+            ui.resolved_size = prev_ui.resolved_size; // TODO: clean this up so we have one place doing all the copying
+            ui.anim_completed = prev_ui.anim_completed;
+            ui.events = prev_ui.events;
+
+            ui.scroll_offset = prev_ui.scroll_offset;
+            ui.children_bounding_size = prev_ui.children_bounding_size;
+            ui.resolved_origin = prev_ui.resolved_origin;
+            ui.scroll_mouse_event = prev_ui.scroll_mouse_event;
+            
+            ui.input = prev_ui.input;
+        } else if (ui.flags.contains(.focus_on_create)) {
+            force_focus_on = str_hash;
+        }
+        return ui;
     }
 
     fn add_to_layout(ui: *UI) void {
@@ -632,12 +801,10 @@ pub const UI = struct {
     //
     pub var layouts_stack: std.ArrayList(*UI) = .empty;
     pub var prev_root_layout: ?*UI = null;
-    pub var root_layout: *UI = undefined;
+    pub var root_layout: *UI = undefined; // we assume the builder code is going to push at least one layout
 
     pub fn push_layout(axis: Axis, str_hash: []const u8, opts: UIOptions) *UI {
-        assert(str_hash.len != 0);
-        const layout = new_default();
-        layout.set_opts(opts);
+        const layout = new(str_hash, opts);
         layout.flags.setPresent(.layout, true);
         layout.layout_axis = axis;
 
@@ -648,11 +815,6 @@ pub const UI = struct {
         }
         layouts_stack.append(gpa, layout) catch @panic("OOM");
 
-        curr_hash.putNoClobber(str_hash, layout) catch unreachable;
-        if (prev_hash.get(str_hash)) |prev_layout| {
-            layout.resolved_size = prev_layout.resolved_size; // TODO: handle target_resolved_size
-            layout.anim_completed = prev_layout.anim_completed;
-        }
         return layout;
     }
 
@@ -665,19 +827,12 @@ pub const UI = struct {
         layout.flags.setPresent(.focusable, true);
 
         if (prev_hash.get(str_hash)) |prev_layout| {
-            layout.scroll_offset = prev_layout.scroll_offset;
-            layout.children_bounding_size = prev_layout.children_bounding_size;
-            layout.resolved_origin = prev_layout.resolved_origin;
-            layout.mouse_event = prev_layout.mouse_event;
-            layout.scroll_mouse_event = prev_layout.scroll_mouse_event;
-            // layout.resolved_size = prev_layout.resolved_size; // TODO: handle target_resolved_size
-
             const scroll_h = layout.children_bounding_size[1];
             const display_h = prev_layout.resolved_size[1];
             if (scroll_h > display_h) {
                 // TODO: arrow key?
                 // handlem mouse scroll
-                if (layout.mouse_event.contains(.Focused))
+                if (layout.events.contains(.Focused))
                     layout.scroll_offset -= ctx.mouse_scroll[1] * dt * 30 * scroll_spd / scroll_h;
 
                 // handle dragging scroll bar
@@ -737,6 +892,11 @@ pub const UI = struct {
         return root_layout;
     }
 
+    fn get_last() *UI {
+        const layout = get_curr_layout();
+        return layout.children.getLastOrNull() orelse layout;
+    }
+
     pub fn reset_layout_tree() void {
         prev_hash.clearRetainingCapacity();
         std.mem.swap(std.StringHashMap(*UI), prev_hash, curr_hash);
@@ -750,6 +910,8 @@ pub const UI = struct {
         root_layout = undefined;
 
         layouts_stack.clearRetainingCapacity();
+
+        mouse_icon = .mouse_normal;
     }
 
     pub fn resolve_layout() void {
@@ -772,42 +934,49 @@ pub const UI = struct {
     }
 
     fn resolve_input_event() void {
-        _ = resolve_input_event_impl(prev_root_layout orelse return, screen_box());
+        var happened = EventSet.initEmpty();
+        _ = resolve_input_event_impl(prev_root_layout orelse return, &happened);
+        force_focus_on = "";
     }
 
-    fn resolve_input_event_impl(node: *UI, _: Box) bool {
-        const is_focused = node.mouse_event.contains(.Focused);
-        node.mouse_event = .initEmpty();
-        node.mouse_event.setPresent(.Focused, is_focused and !ctx.is_mouse_released(.mouse_left));
+    // FIXME: hacky function
+    pub fn handle_mouse(box: Box) EventSet {
+        var mouse_state = EventSet.initEmpty();
+        const hover = mouse_within_rect(box);
+        mouse_state.setPresent(.Hover, hover);
+        mouse_state.setPresent(.Clicked, hover and ctx.is_mouse_released(.mouse_left));
+        mouse_state.setPresent(.Down, hover and ctx.is_mouse_down(.mouse_left));
+        mouse_state.setPresent(.Focused, mouse_state.contains(.Clicked));
+        return mouse_state;
+    }
+
+    fn resolve_input_event_impl(node: *UI, happened: *EventSet) void {
+        const is_prev_focused = node.events.contains(.Focused);
+        node.events = .initEmpty();
+        if (node.flags.contains(.disabled)) return;
+        node.events.setPresent(.Focused, is_prev_focused and !ctx.is_mouse_released(.mouse_left));
         // FIXME: use scissor?
         // const border = node.get_border_box().intersect(parent_border) orelse return;
         const border = node.get_border_box();
-        node.mouse_event.setUnion(handle_mouse(border));
-        if (!node.flags.contains(.focusable)) node.mouse_event.setPresent(.Focused, false);
+        node.events.setUnion(handle_mouse(border));
+        if (!node.flags.contains(.focusable)) node.events.setPresent(.Focused, false);
+        if (force_focus_on.len > 0) {
+            node.events.setPresent(.Focused, std.mem.eql(u8, node.str_hash, force_focus_on));
+        }
+
         if (node.flags.contains(.y_scroll)) {
             node.scroll_mouse_event = .initEmpty();
             node.scroll_mouse_event.setUnion(handle_mouse(node.get_scroll_bar_box()));
         }
-        if (!node.mouse_event.contains(.Hover)) return false;
 
-        // the event of the child can affect that of its parent in one of two ways:
-        // 
-        // 1. the child trumps the parent, i.e. when child is hovered, parent is not.
-        // 2. no effect
-        // 3. propagate upwards
-        var event_stop = EventSet.initFull();
-        event_stop.setPresent(.Focused, false);
-
-        var child_focused = false;
         for (node.children.items) |child| {
-            child_focused |= resolve_input_event_impl(child, border);
-            node.mouse_event.setIntersection(child.mouse_event.intersectWith(event_stop).complement());
+            resolve_input_event_impl(child, happened);
         }
         
-        if (child_focused) {
-            node.mouse_event.setPresent(.Focused, false);
-        }
-        return child_focused or node.mouse_event.contains(.Focused);
+        node.events.setIntersection(happened.complement());
+        happened.setUnion(node.events);
+
+        if (is_prev_focused and !node.events.contains(.Focused)) node.events.setPresent(.Unfocused, true); // do this after testing with happened
     }
 
     fn resolve_size_from_target(node: *UI, axis: Axis) void {
@@ -829,6 +998,7 @@ pub const UI = struct {
                     node.target_size[0] = 2*ctx.pixels(node.padding[0] + node.margin[0]) + ctx.text_width(node.font_scale, node.text_content);
                 },
                 .fixed_in_pixels => |p| node.target_size[0] = ctx.pixels(2*(node.padding[0] + node.margin[0]) + p),
+                .fixed_in_normalized => |size| node.target_size[0] = ctx.pixels(2*(node.padding[0] + node.margin[0])) + size,
                 .span_screen => node.target_size[0] = ctx.x_right() - node.resolved_origin[0],
 
                 .parent_perct,
@@ -858,6 +1028,7 @@ pub const UI = struct {
                     node.target_size[1] = 2*ctx.pixels(node.padding[1] + node.margin[1]) + ctx.cal_font_h(node.font_scale);
                 },
                 .fixed_in_pixels => |p| node.target_size[1] = ctx.pixels(2*(node.padding[1] + node.margin[1]) + p),
+                .fixed_in_normalized => |size| node.target_size[1] = ctx.pixels(2*(node.padding[1] + node.margin[1])) + size,
                 .span_screen => node.target_size[1] = node.resolved_origin[1] - ctx.y_bot(),
 
                 .parent_perct,
@@ -909,17 +1080,19 @@ pub const UI = struct {
     //
     // After this function, both the size and origin are resolved.
     fn resolve_layout_impl(maybe_parent: ?*const UI, node: *UI) void {
+        node.resolved_size = v2scal(node.resolved_size, ctx.pixel_scale/prev_pixel_scale);
         if (maybe_parent) |parent| {
             assert(parent.flags.contains(.layout));
-            node.resolved_origin[0] = parent.resolved_origin[0] + parent.layout_offset[0];
-            node.resolved_origin[1] = parent.resolved_origin[1] + parent.layout_offset[1];
+            if (!node.flags.contains(.absolute)) {
+                node.resolved_origin = v2add(parent.resolved_origin, parent.layout_offset);
+            } else {
+                node.resolved_origin = v2add(parent.resolved_origin, node.abs_offset);
+            }
         } else {
             // topleft corner of the screen
-            node.resolved_origin[0] = ctx.x_left();
-            node.resolved_origin[1] = ctx.y_top();
+            node.resolved_origin = .{ ctx.x_left(), ctx.y_top() };
         }
 
-        node.resolved_size = v2scal(node.resolved_size, ctx.pixel_scale/prev_pixel_scale);
         resolve_size_pre_order(maybe_parent, node); 
         {
             var largest_child = Vec2 { 0, 0 };  
@@ -927,32 +1100,151 @@ pub const UI = struct {
             node.layout_offset[1] -= ctx.pixels(node.padding[1] + node.margin[1]);
             for (node.children.items) |child| {
                 // before recurring into this function, make sure the origin of `node` is resolved
+                if (child.flags.contains(.absolute)) continue;
                 resolve_layout_impl(node, child);
 
                 switch (node.layout_axis) {
                     .X => 
                         node.layout_offset[0] += child.resolved_size[0],
-                        .Y => 
-                            node.layout_offset[1] -= child.resolved_size[1],
+                    .Y => 
+                        node.layout_offset[1] -= child.resolved_size[1],
                 }
                 for (0..2) |i|
                     largest_child[i] = @max(largest_child[i], child.resolved_size[i]);
             }
             node.children_bounding_size[0] = @max(largest_child[0], ctx.pixels(node.padding[0] + node.margin[0]) + @abs(node.layout_offset[0]));
             node.children_bounding_size[1] = @max(largest_child[1], ctx.pixels(node.padding[1] + node.margin[1]) + @abs(node.layout_offset[1]));
-
-
-            for (node.children.items) |child| {
-                offset_origin_recursive(child, .{ 0, node.scroll_offset * node.children_bounding_size[1]});
-            }
         }
         resolve_size_post_order(maybe_parent, node);
+        for (node.children.items) |child| {
+            // before recurring into this function, make sure the origin of `node` is resolved
+            if (!child.flags.contains(.absolute)) continue;
+            resolve_layout_impl(node, child);
+        }
+        for (node.children.items) |child| {
+            offset_origin_recursive(child, .{ 0, node.scroll_offset * node.children_bounding_size[1]});
+        }
+
     }
 };
 
-var rss_db: Sqlite = undefined; // @init_on_main
-var channels: []Sqlite.ChannelWithId = undefined; // @init_on_main
-var posts: []Sqlite.ItemWithChannel = undefined; // @init_on_main
+fn parse_rss(reader: *std.Io.Reader) parser.ParserError!DB.Channel {
+    var streaming_reader: xml.Reader.Static = .init(gpa, reader, .{});
+    defer streaming_reader.deinit();
+    const xml_reader = &streaming_reader.interface;
+
+    
+    try parser.expect_next(xml_reader, .xml_declaration); 
+    // try stdout.print("xml_declaration: version={s} encoding={?s} standalone={?}\n", .{
+    //     xml.reader.xmlDeclarationVersion(),
+    //     xml.reader.xmlDeclarationEncoding(),
+    //     xml.reader.xmlDeclarationStandalone(),
+    // });
+
+    try parser.expect_element_start_name(xml_reader, "rss");
+    // try parser.expect_element_start_name(xml_reader, "channel");
+    const channel = try parser.parse_struct(DB.Channel, xml_reader, "channel", db_arena_state.allocator()); 
+    parser.expect_element_end_name(xml_reader, "rss") catch |e| {
+        std.log.warn("{}: there are probably multiple channels, not supported right now", .{ e });     
+    };
+    return channel;
+}
+
+// Only one channel is supported
+fn parse_rss_buf(buf: []const u8) parser.ParserError!DB.Channel {
+    var streaming_reader: xml.Reader.Static = .init(gpa, buf, .{});
+    defer streaming_reader.deinit();
+    const xml_reader = &streaming_reader.interface;
+
+    
+    try parser.expect_next(xml_reader, .xml_declaration); 
+    // try stdout.print("xml_declaration: version={s} encoding={?s} standalone={?}\n", .{
+    //     xml.reader.xmlDeclarationVersion(),
+    //     xml.reader.xmlDeclarationEncoding(),
+    //     xml.reader.xmlDeclarationStandalone(),
+    // });
+
+    try parser.expect_element_start_name(xml_reader, "rss");
+    // try parser.expect_element_start_name(xml_reader, "channel");
+    const channel = try parser.parse_struct(DB.Channel, xml_reader, "channel", db_arena_state.allocator()); 
+    parser.expect_element_end_name(xml_reader, "rss") catch |e| {
+        std.log.warn("{}: there are probably multiple channels, not supported right now", .{ e });     
+    };
+    return channel;
+}
+
+fn fetch_rss_and_update(url: []const u8)
+    (std.http.Client.FetchError || parser.ParserError || DB.Error)!void 
+{
+    var client = std.http.Client { .allocator = gpa };
+    defer client.deinit();
+
+    var fetch_sink = std.Io.Writer.Allocating.init(gpa);
+    defer fetch_sink.deinit();
+
+    const fetch_res = try client.fetch(.{
+        .location = .{ .url = url },
+        .response_writer = &fetch_sink.writer,
+    });
+    std.log.info("fetching {s}: {}", .{ url, fetch_res.status });
+
+    // var stdout_buf: [4096]u8 = undefined;
+    // var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    // const stdout = &stdout_writer.interface;
+
+
+    const channel = try parse_rss_buf(fetch_sink.written());
+    std.debug.print("Channel: {s}\n{s}\n{s}\n", .{ channel.title, channel.link, channel.description });
+    std.debug.print("Channel extra: {s}\n", .{ channel.language });
+    for (channel.item) |item| {
+        std.debug.print("item {s}\n", .{item.title});
+    }
+
+    try db.add_posts(channel);
+
+}
+
+var db: DB = undefined; // @init_on_main
+var channels: []DB.ChannelWithId = undefined; // @init_on_main
+var posts: []DB.ItemWithChannel = undefined; // @init_on_main
+
+var should_quit = false;
+
+var db_mutex = std.Thread.Mutex {};
+var db_cond = std.Thread.Condition {};
+var db_rss_url: []const u8 = "";
+var db_arena_state: std.heap.ArenaAllocator = undefined; // @init_on_main;
+const fetch_status = enum(u8) {
+    idling,
+    fetching,
+    completed,
+};
+var db_fetch_complete: std.atomic.Value(fetch_status) = .init(.idling);
+
+fn db_worker() void {
+    db_mutex.lock();
+    defer db_mutex.unlock();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    while (!should_quit) {
+        db_cond.wait(&db_mutex);
+        if (should_quit) break;
+        _ = arena.reset(.retain_capacity);
+        UI.add_url_status =  "Fetching...";
+        if (fetch_rss_and_update(db_rss_url)) {
+            UI.add_url_status = "Fetch successful!";
+        } else |e| {
+            switch (e) {
+                error.InvalidFormat => 
+                    UI.add_url_status = "Invalid url",
+                else => 
+                    UI.add_url_status = std.fmt.allocPrint(gpa, "Unexpected Error: {}", .{e}) catch @panic("OOM"),
+            }
+        }
+        db_fetch_complete.store(.completed, .release);
+
+    }
+}
 
 pub fn main() !void {
     var gpa_state: std.heap.GeneralPurposeAllocator(.{}) = .{};
@@ -973,13 +1265,15 @@ pub fn main() !void {
     UI.tmp_arena_state = std.heap.ArenaAllocator.init(gpa);
     UI.tmp_arena = UI.tmp_arena_state.allocator();
 
+    db_arena_state = .init(gpa);
+
     
     std.log.debug("init database.", .{});
-    rss_db = try Sqlite.init("feed.db");
-    defer rss_db.deinit();
+    db = try DB.init("feed.db");
+    defer db.deinit();
 
-    channels = try rss_db.get_channels_all(gpa);
-    posts = try rss_db.get_posts_all(gpa);
+    channels = try db.get_channels_all(gpa);
+    posts = try db.get_posts_all(gpa);
 
     defer { 
         UI.key_hash[0].deinit(); UI.key_hash[1].deinit(); 
@@ -993,9 +1287,16 @@ pub fn main() !void {
 
     UI.prev_pixel_scale = ctx.pixel_scale;
 
+    var db_worker_t = try std.Thread.spawn(.{}, db_worker, .{});
     while (!ctx.window_should_close()) {
         ctx.render();
     }
+    ctx.close_window();
+
+    should_quit = true;
+
+    db_cond.signal();
+    db_worker_t.join();
 }
 
 pub const SMOOTH_SPD = 50;

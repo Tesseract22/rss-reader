@@ -6,9 +6,26 @@ const time = @cImport({
     @cInclude("thirdparty/strptime/LibOb_strptime.h");
 });
 
-const Ds = @import("main.zig");
 
 pub const Error = sqlite.DynamicStatement.PrepareError;
+
+pub const Item = struct {
+    title: [:0]const u8,
+    pubDate: [:0]const u8,
+    link: [:0]const u8,
+    guid: [:0]const u8,
+    description: [:0]const u8,
+};
+
+pub const Channel = struct {
+    title: [:0]const u8,
+    link: [:0]const u8,
+    description: [:0]const u8,
+    language: [:0]const u8 = "",
+    item: []Item,
+};
+
+
 
 db: sqlite.Db,
 
@@ -53,7 +70,7 @@ fn convert_time_format(s: [:0]const u8) ?time.tm {
     return null;
 }
 
-pub fn add_posts(self: *Sqlite, channel: Ds.Channel) sqlite.DynamicStatement.PrepareError!void {
+pub fn add_posts(self: *Sqlite, channel: Channel) sqlite.DynamicStatement.PrepareError!void {
     const q =
         \\INSERT INTO channel (link, title, description)
         \\VALUES (?, ?, ?)
