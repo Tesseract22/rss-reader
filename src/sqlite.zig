@@ -132,6 +132,7 @@ pub const ItemWithChannel = struct {
     guid: [:0]const u8,
     description: [:0]const u8,
     channel: u32,
+    rowid: u32,
 };
 
 pub const ChannelWithId = struct {
@@ -141,7 +142,7 @@ pub const ChannelWithId = struct {
 
 pub fn get_posts_all(self: *Sqlite, a: Allocator) ![]ItemWithChannel {
     const q =
-        \\SELECT title, pubDate, link, link, description, channel
+        \\SELECT title, pubDate, link, link, description, channel, rowid
         \\from post
         ;
     var stmt = try self.db.prepare(q);

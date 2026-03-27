@@ -120,9 +120,9 @@ const Renderer = struct {
                 for (node.children.items) |child| {
                     if (!child.flags.contains(.absolute)) render_ui_impl(child);
                 }
-            } else {
-                draw_text(v2add(box.botleft, v2pixels(node.padding)), node.font_scale, node.text_content, .white);
             }
+
+            draw_text(v2add(box.botleft, v2pixels(node.padding)), node.font_scale, node.text_content, .white);
 
             if (node.flags.contains(.scissor)) {
                 pop_scissor();
@@ -317,10 +317,11 @@ fn find_channel_by_id(channel: u32) DB.ChannelWithId {
     } else return .{ .rowid = std.math.maxInt(u32), .title = "unknown" };
 }
 
+
 // TODO: implement the following functionalities:
-// * Mark a post as read.
-// * Add new channel
-// * Filter post
+// [ ] Mark a post as read.
+// [*] Add new channel
+// [ ] Filter post
 //   * By channel
 //   * By title
 //   * By already read or not
@@ -414,20 +415,48 @@ pub const UI = struct {
             input.dirty_t = 0;
         }
 
-        // pub fn unset_dirty(input: *Input) void {
-        //     input.dirty = false;
-        //     input.dirty_t = 0;
-        // }
+        pub fn unset_dirty(input: *Input) void {
+            input.dirty = false;
+            input.dirty_t = 0;
+        }
 
-        const DIRTY_DELAY = 0.2;
+        const DIRTY_DELAY = 0.0;
         pub fn is_dirty(input: *Input) bool {
             return input.dirty and input.dirty_t >= DIRTY_DELAY;
         }
     } = .{},
 
     // UI logic state
-    pub var selected_post_id: []const u8 = "";
-    pub var add_url_status: []const u8 = " ";
+    var selected_post_id: u32 = INVALID_INDEX;
+    var selected_channel_id: u32 = INVALID_INDEX;
+    var post_search_str: []const u8 = "";
+    var add_url_status: []const u8 = " ";
+    var display_add_popup = false;
+
+    const INVALID_INDEX = std.math.maxInt(u32);
+
+    pub const FilterOptions = struct {
+        channel: u32 = INVALID_INDEX,
+        name: []const u8 = "",
+    };
+
+    fn filter_post(filter: FilterOptions) void {
+        displayed_posts.clearRetainingCapacity();
+        for (posts, 0..) |post, i| {
+            if (filter.channel != INVALID_INDEX and filter.channel != post.channel)
+                continue;
+            if (filter.name.len > 0 and std.mem.indexOf(u8, post.title, filter.name) == null)
+                continue;
+            displayed_posts.append(gpa, @intCast(i)) catch @panic("OOM");
+        }
+    }
+
+    fn filter_and_update() void {
+        selected_post_id = INVALID_INDEX;
+        filter_post(.{ .channel = selected_channel_id, .name = post_search_str });
+    }
+
+
 
 
     // How to implement focused element:
@@ -461,7 +490,6 @@ pub const UI = struct {
 
     const BORDER_THICKNESS = 3;
 
-    var display_add_popup = false;
 
 
     // UI Builder
@@ -469,26 +497,27 @@ pub const UI = struct {
         ctx.clear(.from_u32(0x303030ff));
         {
             _ = push_layout(.Y, "#outer", .{ .w_strategy = .span_screen, .h_strategy = .span_screen });
-           
+
+            const input_enabled = 
+                switch (db_fetch_complete.load(.acquire)) {
+                    .completed => blk: {
+                        // TODO: use arena
+                        // TODO: handle error
+                        posts = db.get_posts_all(gpa) catch unreachable;
+                        channels = db.get_channels_all(gpa) catch unreachable;
+                        db_fetch_complete.store(.idling, .release);
+                        break :blk true;
+                    },
+                    .idling => true,
+                    .fetching => false,
+                };
+
             if (display_add_popup) {
                 const POPUP_SIZE = Vec2 { (ctx.screen_w() * 0.5) / ctx.pixel_scale, 500 };
                 const popup = push_layout(.Y, "#popup", .{ .w_strategy = .{ .fixed_in_pixels = POPUP_SIZE[0] }, .h_strategy = .fit_children, .border_color = COLOR3,
                     .flags = .initMany(&.{.absolute, .focusable }), .abs_offset = .{ (ctx.screen_w()-ctx.pixels(POPUP_SIZE[0]))/2, (ctx.screen_h()-ctx.pixels(POPUP_SIZE[1]))/-2 }});
-                _ = popup;
+                if (popup.events.contains(.Unfocused)) display_add_popup = false;
                 // if (popup.mouse_event.contains(.Unfocused)) display_add_popup = false;
-                const input_enabled = 
-                    switch (db_fetch_complete.load(.acquire)) {
-                        .completed => blk: {
-                            // TODO: use arena
-                            // TODO: handle error
-                            posts = db.get_posts_all(gpa) catch unreachable;
-                            channels = db.get_channels_all(gpa) catch unreachable;
-                            db_fetch_complete.store(.idling, .release);
-                            break :blk true;
-                        },
-                        .idling => true,
-                        .fetching => false,
-                    };
                 const url = input_box("#add url text box", .{ .padding = .{ 10, 10 }, .margin = .{ 5, 5 },
                     .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .fit_text,
                     .font_scale = 0.5, .flags = .initMany(&.{.focus_on_create}),
@@ -519,28 +548,46 @@ pub const UI = struct {
                     .{ .padding = .{ 10, 10 }, .margin = .{ 10, 10 }, .w_strategy = .{ .parent_perct = 0.2 }, .h_strategy = .rest_of_parent });
                 _ = channel_layout;
                 for (channels) |channel| {
-                    _ = text_btn(frame_fmt("{s}#channel", .{ channel.title }),
+                    const selected = channel.rowid == selected_channel_id;
+                    if (text_btn(frame_fmt("{s}#channel", .{ channel.title }),
                         .{ .padding = .{ 10, 10 }, .margin = .{ 4, 4 },
-                            .font_scale = 0.5, .w_strategy = .{ .parent_perct = 1.0 }
-                        });
+                            .font_scale = 0.5, .w_strategy = .{ .parent_perct = 1.0 },
+                            .border_color = if (selected) .white else .transparent, .bg_color = if (selected) COLOR2 else .transparent,
+                        })) {
+                        if (selected) selected_channel_id = INVALID_INDEX
+                        else selected_channel_id = channel.rowid;
+
+                        filter_and_update();
+                    }
                 }
                 pop_layout();
             }
 
             {
-                const post_layout = push_scroll_layout("post_content", .{ .w_strategy = .{ .parent_perct = 0.8 }, .h_strategy = .{ .parent_perct = 1 } });
-                _ = post_layout;
-                for (posts) |post| {
-                    const selected = std.mem.eql(u8, post.guid, selected_post_id);
+                _ = push_layout(.Y, "#post", .{ .w_strategy = .{ .parent_perct = 0.8 }, .h_strategy = .{ .parent_perct = 1 } });
+                post_search_str = input_box("#post_search_box", .{ .w_strategy = .{ .parent_perct = 1}, .h_strategy = .fit_text,
+                        .padding = .{ 10, 10 }, .margin = .{ 0, 5 },
+                        .font_scale = 0.5,
+                        .bg_color = COLOR2, .border_color = TEXT_COLOR
+                });
+                const search_box = get_last();
+                if (search_box.input.is_dirty()) {
+                    search_box.input.unset_dirty();
+                    filter_and_update(); // this is blocking, but performance seams fine for now.
+                }
+                _ = push_scroll_layout("#post_content", .{ .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .rest_of_parent, .flags = .initOne(.focus_on_create) });
+                for (displayed_posts.items) |post_idx| {
+                    const post = posts[post_idx];
+                    const selected = post.rowid == selected_post_id;
                     if (text_btn(frame_fmt("{s}#post_title", .{ post.title }), 
                         .{ 
                             .padding = .{ 10, 20 }, .margin = .{ 10, 0 },
                             .border_color = if (selected) .white else .transparent, .bg_color = if (selected) COLOR2 else .transparent,
                             .font_scale = 0.5, .w_strategy = .{ .parent_perct = 1 },
-                            .flags = .initOne(.scissor),
+                            .flags = .initMany(&.{.scissor, .highlight_text}),
                         })) {
-                        if (selected) selected_post_id = ""
-                        else selected_post_id = post.guid;
+                        if (selected) selected_post_id = INVALID_INDEX
+                        else selected_post_id = post.rowid;
                     }
 
                     if (selected) {
@@ -576,6 +623,7 @@ pub const UI = struct {
                         pop_layout();
                     }
                 }
+                pop_layout();
                 pop_layout();
             }
 
@@ -615,6 +663,7 @@ pub const UI = struct {
         focusable,
         focus_on_create,
         absolute,
+        highlight_text,
     };
 
     pub const MouseEvent = enum {
@@ -736,9 +785,6 @@ pub const UI = struct {
                 ui.input.set_dirty();
             }
 
-            if (ctx.is_key_pressed(.backSpace) and ui.input.storage.items.len != 0) {
-                // FIXME: handle backspace when cursor is not at the very right
-            }
             if (ctx.is_paste) {
                 const buf = ctx.clipboard();
                 ui.input.storage.insertSlice(gpa, ui.input.cursor, buf) catch unreachable;
@@ -747,6 +793,7 @@ pub const UI = struct {
                 ui.input.set_dirty();
             }
 
+            // TODO: handle this like backspace
             // Cursor movement
             if (ctx.is_key_pressed(.left) and ui.input.cursor > 0) {
                 ui.input.cursor -= 1;
@@ -947,6 +994,7 @@ pub const UI = struct {
         mouse_state.setPresent(.Clicked, hover and ctx.is_mouse_released(.mouse_left));
         mouse_state.setPresent(.Down, hover and ctx.is_mouse_down(.mouse_left));
         mouse_state.setPresent(.Focused, mouse_state.contains(.Clicked));
+        mouse_state.setPresent(.Unfocused, !mouse_state.contains(.Hover) and ctx.is_mouse_released(.mouse_left));
         return mouse_state;
     }
 
@@ -972,11 +1020,10 @@ pub const UI = struct {
         for (node.children.items) |child| {
             resolve_input_event_impl(child, happened);
         }
-        
+    
+        happened.setPresent(.Unfocused, false);
         node.events.setIntersection(happened.complement());
         happened.setUnion(node.events);
-
-        if (is_prev_focused and !node.events.contains(.Focused)) node.events.setPresent(.Unfocused, true); // do this after testing with happened
     }
 
     fn resolve_size_from_target(node: *UI, axis: Axis) void {
@@ -1207,6 +1254,7 @@ fn fetch_rss_and_update(url: []const u8)
 var db: DB = undefined; // @init_on_main
 var channels: []DB.ChannelWithId = undefined; // @init_on_main
 var posts: []DB.ItemWithChannel = undefined; // @init_on_main
+var displayed_posts: std.ArrayList(u32) = .empty;
 
 var should_quit = false;
 
@@ -1274,6 +1322,7 @@ pub fn main() !void {
 
     channels = try db.get_channels_all(gpa);
     posts = try db.get_posts_all(gpa);
+    UI.filter_and_update(.{});
 
     defer { 
         UI.key_hash[0].deinit(); UI.key_hash[1].deinit(); 
