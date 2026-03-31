@@ -52,6 +52,7 @@ pub fn build(b: *std.Build) void {
         .file = b.path("thirdparty/strptime/LibOb_strptime.c"),
     });
     rss_reader_mod.addIncludePath(b.path("."));
+    rss_reader_mod.linkSystemLibrary("imm32", .{ });
 
 
 

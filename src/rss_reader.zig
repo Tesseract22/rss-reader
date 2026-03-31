@@ -54,12 +54,12 @@ const Renderer = struct {
     pub var fps: f32 = 0;
 
     pub var scissor_stack: std.ArrayList(Box) = .empty;
+    pub var print_debug = false;
 
     pub fn render(_: *RendererContet) void {
-        const self = ctx.user_data;
-        _ = self;
         UI.resolve_input_event(); 
         UI.render();
+        const num_of_ui = count_ui(UI.get_root_layout());
 
         UI.resolve_layout();
         render_ui();
@@ -67,21 +67,32 @@ const Renderer = struct {
 
         frame_time_sum += ctx.get_delta_time();
         counter += 1;
-
-        var text_buf: [64]u8 = undefined;
-
-        const frame_time_text = std.fmt.bufPrint(&text_buf, "frame time: {d:.5}ms", .{ ctx.get_delta_time() * 1000 }) catch unreachable;
-        draw_text(.{ ctx.x_right()-0.25, ctx.y_top()-ctx.cal_font_h(1) },  0.3, frame_time_text, UI.TEXT_COLOR);
-
         if (frame_time_sum >= fps_avg_frame_time) {
             fps = @as(f32, @floatFromInt(counter)) / frame_time_sum;
             frame_time_sum = 0;
             counter = 0;
         }
+        if (ctx.is_key_released(.F12)) print_debug = !print_debug;
+        if (print_debug) {
 
-        const fps_text = std.fmt.bufPrint(&text_buf, "fps: {d:.5}", .{ fps }) catch unreachable;
-        draw_text(.{ ctx.x_right()-0.25, ctx.y_top()-ctx.cal_font_h(1)*0.5 },  0.3, fps_text, .white);
-        
+            var text_buf: [64]u8 = undefined;
+            const debug_font = 0.3;
+            const x = ctx.x_right() - ctx.text_width(debug_font, " ") * text_buf.len;
+            {
+                const text = std.fmt.bufPrint(&text_buf, "frame time: {d:.5}ms", .{ ctx.get_delta_time() * 1000 }) catch unreachable;
+                draw_text(.{ x, ctx.y_top()-ctx.cal_font_h(debug_font) }, debug_font, text, UI.TEXT_COLOR);
+            }
+
+            {
+                const text = std.fmt.bufPrint(&text_buf, "fps: {d:.5}", .{ fps }) catch unreachable;
+                draw_text(.{ x, ctx.y_top()-ctx.cal_font_h(debug_font)*2 }, debug_font, text, .white);
+            }
+
+            { 
+                const text = std.fmt.bufPrint(&text_buf, "# of UI widget: {}, memory usage of UI widget: {}KB", .{ num_of_ui, num_of_ui * @sizeOf(UI) / 1024 }) catch unreachable;
+                draw_text(.{ x, ctx.y_top()-ctx.cal_font_h(debug_font)*3 },  debug_font, text, .white);
+            }
+        }
 
         // draw_rect(.{ 0, 0 }, .{ 0.2, 0.2 }, .black);
         flush();
@@ -93,6 +104,14 @@ const Renderer = struct {
         scissor_stack.clearRetainingCapacity();
 
         render_ui_impl(UI.get_root_layout());
+    }
+
+    fn count_ui(node: *UI) u32 {
+        var ct: u32 = 1;
+        for (node.children.items) |child| {
+            ct += count_ui(child);
+        }
+        return ct;
     }
 
     fn draw_btn_effects(mouse_state: UI.EventSet, box: Box) void {
@@ -111,10 +130,12 @@ const Renderer = struct {
         draw_rect_lines(box.botleft, box.size, node.border_width, node.border_color);
 
 
-        {
-            if (node.flags.contains(.scissor)) {
-                push_scissor(box);
-            }
+        blk: {
+            const scissor_area = if (node.flags.contains(.scissor))
+                push_scissor(box) else UI.screen_box();
+            defer if (node.flags.contains(.scissor))
+                pop_scissor();
+            if (v2eq(scissor_area.size, .{ 0, 0 })) break :blk;
 
             if (node.flags.contains(.layout)) {
                 for (node.children.items) |child| {
@@ -122,11 +143,14 @@ const Renderer = struct {
                 }
             }
 
-            draw_text(v2add(box.botleft, v2pixels(node.padding)), node.font_scale, node.text_content, .white);
-
-            if (node.flags.contains(.scissor)) {
-                pop_scissor();
+            const content = node.get_content_box();
+            if (node.flags.contains(.highlight_text) and std.mem.startsWith(u8, node.text_content, UI.post_search_str)) {
+                draw_rect(content.botleft, .{ ctx.text_width(node.font_scale, UI.post_search_str), ctx.cal_font_h(node.font_scale) }, UI.COLOR2);
             }
+            // TODO: case insensitive
+            draw_text(content.botleft, node.font_scale, node.text_content, .white);
+
+            
         }
 
         if (node.flags.contains(.input_box)) {
@@ -221,7 +245,7 @@ const Renderer = struct {
 
     // return false if the new scissor does not overlap with the last scissor at all,
     // and thus all drawing can be skipped
-    fn push_scissor(box: Box) void {
+    fn push_scissor(box: Box) Box {
         flush();
         const new_scissor = if (scissor_stack.getLastOrNull()) |top|
             top.intersect(box) orelse Box { .botleft = .{ 0, 0 }, .size = .{ 0, 0 } }
@@ -230,6 +254,7 @@ const Renderer = struct {
 
         ctx.begin_scissor_gl_coord(new_scissor.botleft, new_scissor.size);
         scissor_stack.append(gpa, new_scissor) catch @panic("OOM");
+        return box;
     }
 
     fn pop_scissor() void {
@@ -378,7 +403,7 @@ pub const UI = struct {
     font_scale: f32 = 1,
     bg_color: RGBA = COLOR1,
     border_color: RGBA = COLOR2,
-    focus_border_color: RGBA = TEXT_COLOR,
+    focus_border_color: RGBA = COLOR4,
     border_width: f32 = 2,
     padding: Vec2 = .{ 0, 0 },
     margin: Vec2 = .{ 0, 0 },
@@ -748,10 +773,6 @@ pub const UI = struct {
         ui.add_to_layout();
     }
 
-    // pub fn input_box(str_hash: []const u8, opts: UIOptions) void {
-
-    // }
-
     pub fn text_btn(content: []const u8, opts: UIOptions) bool {
         const ui = new(content, opts);     
 
@@ -761,8 +782,6 @@ pub const UI = struct {
         return ui.events.contains(.Clicked);
     }
 
-
-
     // TODO: deal with utf-8
     pub fn input_box(str_hash: []const u8, opts: UIOptions) []const u8 {
         const ui = new(str_hash, opts);
@@ -771,6 +790,9 @@ pub const UI = struct {
         ui.add_to_layout();
         const dt = ctx.get_delta_time();
         if (ui.events.contains(.Focused)) {
+            if (prev_hash.get(str_hash)) |prev_ui| {
+                ctx.ime_set_composition_windows(prev_ui.resolved_origin[0], -(prev_ui.resolved_origin[1]) + prev_ui.resolved_size[1]);
+            }
             const new_chars_ct = ctx.input_chars.items.len;
             ui.input.storage.insertSlice(gpa, ui.input.cursor, ctx.input_chars.items) catch unreachable;
             ui.input.cursor += @intCast(new_chars_ct);
@@ -1322,7 +1344,7 @@ pub fn main() !void {
 
     channels = try db.get_channels_all(gpa);
     posts = try db.get_posts_all(gpa);
-    UI.filter_and_update(.{});
+    UI.filter_and_update();
 
     defer { 
         UI.key_hash[0].deinit(); UI.key_hash[1].deinit(); 
