@@ -77,7 +77,7 @@ const Renderer = struct {
 
             var text_buf: [64]u8 = undefined;
             const debug_font = 0.3;
-            const x = ctx.x_right() - ctx.text_width(debug_font, " ") * text_buf.len;
+            const x = ctx.x_right() - ctx.text_width_ascii(debug_font, " ") * text_buf.len;
             {
                 const text = std.fmt.bufPrint(&text_buf, "frame time: {d:.5}ms", .{ ctx.get_delta_time() * 1000 }) catch unreachable;
                 draw_text(.{ x, ctx.y_top()-ctx.cal_font_h(debug_font) }, debug_font, text, UI.TEXT_COLOR);
@@ -144,17 +144,23 @@ const Renderer = struct {
             }
 
             const content = node.get_content_box();
-            if (node.flags.contains(.highlight_text) and std.mem.startsWith(u8, node.text_content, UI.post_search_str)) {
-                draw_rect(content.botleft, .{ ctx.text_width(node.font_scale, UI.post_search_str), ctx.cal_font_h(node.font_scale) }, UI.COLOR2);
-            }
+            // if (node.flags.contains(.highlight_text) and std.mem.startsWith(u21, node.text_content, UI.post_search_str)) {
+            //     draw_rect(content.botleft, .{ ctx.text_width(node.font_scale, UI.post_search_str), ctx.cal_font_h(node.font_scale) }, UI.COLOR2);
+            // }
             // TODO: case insensitive
-            draw_text(content.botleft, node.font_scale, node.text_content, .white);
-
-            
+            switch (node.text_content) {
+                .ascii => |bytes|
+                    draw_text(content.botleft, node.font_scale, bytes, .white),
+                .utf8 => |codepoints|
+                    draw_text_codepoints(content.botleft, node.font_scale, codepoints, .white),
+            }
         }
 
         if (node.flags.contains(.input_box)) {
-            const tw = ctx.text_width(node.font_scale, node.text_content[0..node.input.cursor]);
+            const tw = switch (node.text_content) {
+                .ascii => |bytes| ctx.text_width_ascii(node.font_scale, bytes[0..node.input.cursor]),
+                .utf8 => |codepoint| ctx.text_width_codepoints(node.font_scale, codepoint[0..node.input.cursor]),
+            };
             const content_box = node.get_content_box();
             const end_of_text = content_box.botleft[0] + tw;
             const cursor_box = Box.from_centerleft(
@@ -226,6 +232,16 @@ const Renderer = struct {
         switch_or_append_state(
             .{ .tex = .{ .id = ctx.fonts.tex, .w = undefined, .h = undefined }, .border_thickness = null, .shader = ctx.font_shader_pgm }, 0);
         var it = ctx.make_code_point_vertex_data(pos, font_scale, text, 1024*1024, rgba);
+        while (it.next()) |vertexes| {
+            append_state(1);
+            batches.append(gpa, vertexes) catch unreachable;
+        }
+    }
+
+    fn draw_text_codepoints(pos: Vec2, font_scale: f32, codepoints: []const u21, rgba: RGBA) void {
+        switch_or_append_state(
+            .{ .tex = .{ .id = ctx.fonts.tex, .w = undefined, .h = undefined }, .border_thickness = null, .shader = ctx.font_shader_pgm }, 0);
+        var it = ctx.make_code_point_vertex_data_from_codepoints(pos, font_scale, codepoints, 1024*1024, rgba);
         while (it.next()) |vertexes| {
             append_state(1);
             batches.append(gpa, vertexes) catch unreachable;
@@ -394,12 +410,32 @@ pub const UI = struct {
     pub var force_focus_on: []const u8 = "";
 
     pub var mouse_icon = RendererContet.MouseIcon.mouse_normal;
+
+    pub const TextContent = union(enum) {
+        ascii: []const u8,
+        utf8: []const u21,
+
+        pub fn width(self: TextContent, scale: f32, range: [2]u32) f32 {
+            return switch (self) {
+                .ascii => |bytes| ctx.text_width_ascii(scale, bytes[range[0]..range[1]]),
+                .utf8 => |codepoint| ctx.text_width_codepoints(scale, codepoint[range[0]..range[1]]),
+            };
+        }
+
+        pub fn len(self: TextContent) u32 {
+            return @intCast(switch (self) {
+                .ascii => |bytes| bytes.len,
+                .utf8 => |codepoint| codepoint.len,
+            });
+
+        }
+    };
                
     str_hash: []const u8 = "",
     flags: std.EnumSet(Flag) = .initEmpty(),
 
     children: std.ArrayList(*UI) = .empty,
-    text_content: []const u8 = "",
+    text_content: TextContent = .{ .ascii = "" },
     font_scale: f32 = 1,
     bg_color: RGBA = COLOR1,
     border_color: RGBA = COLOR2,
@@ -427,7 +463,8 @@ pub const UI = struct {
     scroll_mouse_event: EventSet = .initEmpty(),
 
     input: struct {
-        storage: std.ArrayList(u8) = .empty,
+        utf8_storage: std.ArrayList(u21) = .empty,
+        ascii_storage: std.ArrayList(u8) = .empty,
         cursor: u32 = 0,
         dirty: bool = false,
         dirty_t: f32 = 0,
@@ -454,7 +491,7 @@ pub const UI = struct {
     // UI logic state
     var selected_post_id: u32 = INVALID_INDEX;
     var selected_channel_id: u32 = INVALID_INDEX;
-    var post_search_str: []const u8 = "";
+    var post_search_str: []const u21 = &.{};
     var add_url_status: []const u8 = " ";
     var display_add_popup = false;
 
@@ -462,27 +499,26 @@ pub const UI = struct {
 
     pub const FilterOptions = struct {
         channel: u32 = INVALID_INDEX,
-        name: []const u8 = "",
+        name: []const u21 = &.{},
     };
 
     fn filter_post(filter: FilterOptions) void {
+        selected_post_id = INVALID_INDEX;
         displayed_posts.clearRetainingCapacity();
-        for (posts, 0..) |post, i| {
+        for (posts, post_title_codepoints, 0..) |post, title, i| {
+            // TODO: optimize this
             if (filter.channel != INVALID_INDEX and filter.channel != post.channel)
                 continue;
-            if (filter.name.len > 0 and std.mem.indexOf(u8, post.title, filter.name) == null)
+            if (filter.name.len > 0 and std.mem.indexOf(u21, title, filter.name) == null)
                 continue;
             displayed_posts.append(gpa, @intCast(i)) catch @panic("OOM");
         }
     }
 
-    fn filter_and_update() void {
+    pub fn filter_post_and_update() void {
         selected_post_id = INVALID_INDEX;
         filter_post(.{ .channel = selected_channel_id, .name = post_search_str });
     }
-
-
-
 
     // How to implement focused element:
     //
@@ -528,8 +564,7 @@ pub const UI = struct {
                     .completed => blk: {
                         // TODO: use arena
                         // TODO: handle error
-                        posts = db.get_posts_all(gpa) catch unreachable;
-                        channels = db.get_channels_all(gpa) catch unreachable;
+                        update_data();
                         db_fetch_complete.store(.idling, .release);
                         break :blk true;
                     },
@@ -543,7 +578,7 @@ pub const UI = struct {
                     .flags = .initMany(&.{.absolute, .focusable }), .abs_offset = .{ (ctx.screen_w()-ctx.pixels(POPUP_SIZE[0]))/2, (ctx.screen_h()-ctx.pixels(POPUP_SIZE[1]))/-2 }});
                 if (popup.events.contains(.Unfocused)) display_add_popup = false;
                 // if (popup.mouse_event.contains(.Unfocused)) display_add_popup = false;
-                const url = input_box("#add url text box", .{ .padding = .{ 10, 10 }, .margin = .{ 5, 5 },
+                const url = input_box_ascii("#add url text box", .{ .padding = .{ 10, 10 }, .margin = .{ 5, 5 },
                     .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .fit_text,
                     .font_scale = 0.5, .flags = .initMany(&.{.focus_on_create}),
                     .bg_color = COLOR2, .border_color = TEXT_COLOR });
@@ -558,6 +593,7 @@ pub const UI = struct {
                     db_rss_url = url;
                     db_cond.signal();
                 }
+                get_last().flags.setPresent(.disabled, !input_enabled);
                 
                 pop_layout();
             }
@@ -582,15 +618,16 @@ pub const UI = struct {
                         if (selected) selected_channel_id = INVALID_INDEX
                         else selected_channel_id = channel.rowid;
 
-                        filter_and_update();
+                        filter_post_and_update();
                     }
                 }
                 pop_layout();
             }
 
+            
             {
                 _ = push_layout(.Y, "#post", .{ .w_strategy = .{ .parent_perct = 0.8 }, .h_strategy = .{ .parent_perct = 1 } });
-                post_search_str = input_box("#post_search_box", .{ .w_strategy = .{ .parent_perct = 1}, .h_strategy = .fit_text,
+                post_search_str = input_box_utf8("#post_search_box", .{ .w_strategy = .{ .parent_perct = 1}, .h_strategy = .fit_text,
                         .padding = .{ 10, 10 }, .margin = .{ 0, 5 },
                         .font_scale = 0.5,
                         .bg_color = COLOR2, .border_color = TEXT_COLOR
@@ -598,7 +635,7 @@ pub const UI = struct {
                 const search_box = get_last();
                 if (search_box.input.is_dirty()) {
                     search_box.input.unset_dirty();
-                    filter_and_update(); // this is blocking, but performance seams fine for now.
+                    filter_post_and_update(); // this is blocking, but performance seams fine for now.
                 }
                 _ = push_scroll_layout("#post_content", .{ .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .rest_of_parent, .flags = .initOne(.focus_on_create) });
                 for (displayed_posts.items) |post_idx| {
@@ -769,21 +806,21 @@ pub const UI = struct {
 
     pub fn text(content: []const u8, opts: UIOptions) void {
         const ui = new(content, opts);     
-        ui.text_content = preprocess_text(content);
+        ui.text_content = .{ .ascii = preprocess_text(content) };
         ui.add_to_layout();
     }
 
     pub fn text_btn(content: []const u8, opts: UIOptions) bool {
         const ui = new(content, opts);     
 
-        ui.text_content = preprocess_text(content);
+        ui.text_content = .{ .ascii = preprocess_text(content) };
         ui.flags.setPresent(.button, true);
         ui.add_to_layout();
         return ui.events.contains(.Clicked);
     }
 
     // TODO: deal with utf-8
-    pub fn input_box(str_hash: []const u8, opts: UIOptions) []const u8 {
+    pub fn input_box_utf8(str_hash: []const u8, opts: UIOptions) []const u21 {
         const ui = new(str_hash, opts);
         ui.flags.setPresent(.focusable, true);
         ui.flags.setPresent(.input_box, true);
@@ -794,7 +831,7 @@ pub const UI = struct {
                 ctx.ime_set_composition_windows(prev_ui.resolved_origin[0], -(prev_ui.resolved_origin[1]) + prev_ui.resolved_size[1]);
             }
             const new_chars_ct = ctx.input_chars.items.len;
-            ui.input.storage.insertSlice(gpa, ui.input.cursor, ctx.input_chars.items) catch unreachable;
+            ui.input.utf8_storage.insertSlice(gpa, ui.input.cursor, ctx.input_chars.items) catch unreachable;
             ui.input.cursor += @intCast(new_chars_ct);
 
             if (new_chars_ct > 0)
@@ -802,16 +839,14 @@ pub const UI = struct {
 
             const ch_to_removed = @min(ui.input.cursor, ctx.backspace);
             for (0..ch_to_removed) |_| {
-                _ = ui.input.storage.orderedRemove(ui.input.cursor-1);
+                _ = ui.input.utf8_storage.orderedRemove(ui.input.cursor-1);
                 ui.input.cursor -= 1;
                 ui.input.set_dirty();
             }
 
             if (ctx.is_paste) {
                 const buf = ctx.clipboard();
-                ui.input.storage.insertSlice(gpa, ui.input.cursor, buf) catch unreachable;
-                ui.input.cursor += @intCast(buf.len);
-
+                ui.input.cursor += gl.append_utf8_slice(&ui.input.utf8_storage, gpa, buf) catch @panic("TODO: handle invalid utf8 sequence");
                 ui.input.set_dirty();
             }
 
@@ -820,7 +855,7 @@ pub const UI = struct {
             if (ctx.is_key_pressed(.left) and ui.input.cursor > 0) {
                 ui.input.cursor -= 1;
             }
-            if (ctx.is_key_pressed(.right) and ui.input.cursor < ui.input.storage.items.len) {
+            if (ctx.is_key_pressed(.right) and ui.input.cursor < ui.input.utf8_storage.items.len) {
                 ui.input.cursor += 1;
             }
         }
@@ -832,8 +867,64 @@ pub const UI = struct {
             mouse_icon = .mouse_ibeam;
 
         
-        ui.text_content = ui.input.storage.items;
-        return ui.text_content;
+        ui.text_content = .{ .utf8 = ui.input.utf8_storage.items };
+        return ui.text_content.utf8;
+    }
+
+    pub fn input_box_ascii(str_hash: []const u8, opts: UIOptions) []const u8 {
+        const ui = new(str_hash, opts);
+        ui.flags.setPresent(.focusable, true);
+        ui.flags.setPresent(.input_box, true);
+        ui.add_to_layout();
+        const dt = ctx.get_delta_time();
+        if (ui.events.contains(.Focused)) {
+            ctx.ime_disable_composition();
+            var new_chars_ct: u32 = 0;
+            for (ctx.input_chars.items) |codepoint| {
+                if (codepoint > std.math.maxInt(u8)) continue;
+                const ascii: u8 = @intCast(codepoint);
+                if (!std.ascii.isAscii(ascii)) continue;
+                ui.input.ascii_storage.insert(gpa, ui.input.cursor, ascii) catch @panic("OOM");
+                ui.input.cursor += 1;
+                new_chars_ct += 1;
+            }
+
+            if (new_chars_ct > 0)
+                ui.input.set_dirty();
+
+            const ch_to_removed = @min(ui.input.cursor, ctx.backspace);
+            for (0..ch_to_removed) |_| {
+                _ = ui.input.ascii_storage.orderedRemove(ui.input.cursor-1);
+                ui.input.cursor -= 1;
+                ui.input.set_dirty();
+            }
+
+            if (ctx.is_paste) {
+                // TODO: validate ascii
+                const buf = ctx.clipboard();
+                ui.input.ascii_storage.appendSlice(gpa, buf) catch @panic("OOM");
+                ui.input.cursor += @intCast(buf.len);
+                ui.input.set_dirty();
+            }
+
+            // TODO: handle this like backspace
+            // Cursor movement
+            if (ctx.is_key_pressed(.left) and ui.input.cursor > 0) {
+                ui.input.cursor -= 1;
+            }
+            if (ctx.is_key_pressed(.right) and ui.input.cursor < ui.input.ascii_storage.items.len) {
+                ui.input.cursor += 1;
+            }
+        }
+
+        if (ui.input.dirty)
+            ui.input.dirty_t += dt;
+
+        if (ui.events.contains(.Hover))
+            mouse_icon = .mouse_ibeam;
+
+        ui.text_content = .{ .ascii = ui.input.ascii_storage.items };
+        return ui.text_content.ascii;
     }
 
     fn new(str_hash: []const u8, opts: UIOptions) *UI {
@@ -1064,7 +1155,7 @@ pub const UI = struct {
         if (node.w_strategy.is_pre_order()) {
             switch (node.w_strategy) {
                 .fit_text => {
-                    node.target_size[0] = 2*ctx.pixels(node.padding[0] + node.margin[0]) + ctx.text_width(node.font_scale, node.text_content);
+                    node.target_size[0] = 2*ctx.pixels(node.padding[0] + node.margin[0]) + node.text_content.width(node.font_scale, .{ 0, node.text_content.len() });
                 },
                 .fixed_in_pixels => |p| node.target_size[0] = ctx.pixels(2*(node.padding[0] + node.margin[0]) + p),
                 .fixed_in_normalized => |size| node.target_size[0] = ctx.pixels(2*(node.padding[0] + node.margin[0])) + size,
@@ -1276,13 +1367,14 @@ fn fetch_rss_and_update(url: []const u8)
 var db: DB = undefined; // @init_on_main
 var channels: []DB.ChannelWithId = undefined; // @init_on_main
 var posts: []DB.ItemWithChannel = undefined; // @init_on_main
+var post_title_codepoints: [][]u21 = undefined; // @init_on_main
 var displayed_posts: std.ArrayList(u32) = .empty;
 
 var should_quit = false;
 
 var db_mutex = std.Thread.Mutex {};
 var db_cond = std.Thread.Condition {};
-var db_rss_url: []const u8 = "";
+var db_rss_url: []const u8 = &.{};
 var db_arena_state: std.heap.ArenaAllocator = undefined; // @init_on_main;
 const fetch_status = enum(u8) {
     idling,
@@ -1312,7 +1404,22 @@ fn db_worker() void {
             }
         }
         db_fetch_complete.store(.completed, .release);
+    }
+}
 
+fn update_data() void {
+    // TODO: memory leak
+    // TODO: handle error
+    channels = db.get_channels_all(gpa) catch unreachable;
+    posts = db.get_posts_all(gpa) catch unreachable;
+    post_title_codepoints = gpa.alloc([]u21, posts.len) catch @panic("OOM");
+    for (posts, post_title_codepoints) |post, *codepoints| {
+        const codepoints_count = std.unicode.utf8CountCodepoints(post.title) catch 0;
+        codepoints.* = gpa.alloc(u21, codepoints_count) catch @panic("OOM");
+        var it = std.unicode.Utf8View.initUnchecked(post.title).iterator();
+        for (codepoints.*) |*codepoint| {
+            codepoint.* = it.nextCodepoint().?;
+        }
     }
 }
 
@@ -1342,9 +1449,8 @@ pub fn main() !void {
     db = try DB.init("feed.db");
     defer db.deinit();
 
-    channels = try db.get_channels_all(gpa);
-    posts = try db.get_posts_all(gpa);
-    UI.filter_and_update();
+    update_data();
+    UI.filter_post_and_update();
 
     defer { 
         UI.key_hash[0].deinit(); UI.key_hash[1].deinit(); 
