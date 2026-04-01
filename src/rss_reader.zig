@@ -405,6 +405,13 @@ pub const UI = struct {
     pub var tmp_arena_state: std.heap.ArenaAllocator = undefined; // @init_on_main
     pub var tmp_arena: Allocator = undefined; // @init_on_main
 
+    //
+    // Input events
+    //
+    pub var input_chars: std.ArrayList(u21) = .empty;
+    pub var backspace: u32 = 0;
+    pub var is_paste = false;
+
     pub var prev_pixel_scale: f32 = undefined; // @init_on_main
   
     pub var force_focus_on: []const u8 = "";
@@ -830,14 +837,14 @@ pub const UI = struct {
             if (prev_hash.get(str_hash)) |prev_ui| {
                 ctx.ime_set_composition_windows(prev_ui.resolved_origin[0], -(prev_ui.resolved_origin[1]) + prev_ui.resolved_size[1]);
             }
-            const new_chars_ct = ctx.input_chars.items.len;
-            ui.input.utf8_storage.insertSlice(gpa, ui.input.cursor, ctx.input_chars.items) catch unreachable;
+            const new_chars_ct = UI.input_chars.items.len;
+            ui.input.utf8_storage.insertSlice(gpa, ui.input.cursor, UI.input_chars.items) catch unreachable;
             ui.input.cursor += @intCast(new_chars_ct);
 
             if (new_chars_ct > 0)
                 ui.input.set_dirty();
 
-            const ch_to_removed = @min(ui.input.cursor, ctx.backspace);
+            const ch_to_removed = @min(ui.input.cursor, UI.backspace);
             for (0..ch_to_removed) |_| {
                 _ = ui.input.utf8_storage.orderedRemove(ui.input.cursor-1);
                 ui.input.cursor -= 1;
@@ -852,10 +859,10 @@ pub const UI = struct {
 
             // TODO: handle this like backspace
             // Cursor movement
-            if (ctx.is_key_pressed(.left) and ui.input.cursor > 0) {
+            if (ctx.is_key_pressed(.Left) and ui.input.cursor > 0) {
                 ui.input.cursor -= 1;
             }
-            if (ctx.is_key_pressed(.right) and ui.input.cursor < ui.input.utf8_storage.items.len) {
+            if (ctx.is_key_pressed(.Right) and ui.input.cursor < ui.input.utf8_storage.items.len) {
                 ui.input.cursor += 1;
             }
         }
@@ -880,7 +887,7 @@ pub const UI = struct {
         if (ui.events.contains(.Focused)) {
             ctx.ime_disable_composition();
             var new_chars_ct: u32 = 0;
-            for (ctx.input_chars.items) |codepoint| {
+            for (UI.input_chars.items) |codepoint| {
                 if (codepoint > std.math.maxInt(u8)) continue;
                 const ascii: u8 = @intCast(codepoint);
                 if (!std.ascii.isAscii(ascii)) continue;
@@ -892,7 +899,7 @@ pub const UI = struct {
             if (new_chars_ct > 0)
                 ui.input.set_dirty();
 
-            const ch_to_removed = @min(ui.input.cursor, ctx.backspace);
+            const ch_to_removed = @min(ui.input.cursor, backspace);
             for (0..ch_to_removed) |_| {
                 _ = ui.input.ascii_storage.orderedRemove(ui.input.cursor-1);
                 ui.input.cursor -= 1;
@@ -909,10 +916,10 @@ pub const UI = struct {
 
             // TODO: handle this like backspace
             // Cursor movement
-            if (ctx.is_key_pressed(.left) and ui.input.cursor > 0) {
+            if (ctx.is_key_pressed(.Left) and ui.input.cursor > 0) {
                 ui.input.cursor -= 1;
             }
-            if (ctx.is_key_pressed(.right) and ui.input.cursor < ui.input.ascii_storage.items.len) {
+            if (ctx.is_key_pressed(.Right) and ui.input.cursor < ui.input.ascii_storage.items.len) {
                 ui.input.cursor += 1;
             }
         }
@@ -1423,6 +1430,9 @@ fn update_data() void {
     }
 }
 
+const Key = RendererContet.Key;
+const KeyMod = RendererContet.KeyMod;
+
 pub fn main() !void {
     var gpa_state: std.heap.GeneralPurposeAllocator(.{}) = .{};
     gpa = gpa_state.allocator();
@@ -1466,6 +1476,34 @@ pub fn main() !void {
 
     var db_worker_t = try std.Thread.spawn(.{}, db_worker, .{});
     while (!ctx.window_should_close()) {
+        UI.input_chars.clearRetainingCapacity();
+        UI.backspace = 0;
+        UI.is_paste = false;
+        while (ctx.poll_event()) |event| {
+            switch (event) {
+                .composition => |composition| {
+
+                    UI.input_chars.appendSlice(gpa, composition.codepoints) catch @panic("OOM");
+                },
+                .key_char => |codepoint| {
+                    if (codepoint == @intFromEnum(Key.BackSpace))
+                        UI.backspace += 1
+                    else if (codepoint <= std.math.maxInt(u8)) {
+                        const ascii: u8 = @intCast(codepoint);
+                        if (ascii >= RendererContet.code_first_char and ascii <= RendererContet.code_last_char)
+                            UI.input_chars.append(gpa, codepoint) catch @panic("OOM");
+                    } else
+                        UI.input_chars.append(gpa, codepoint) catch @panic("OOM");
+                    // if (std.enums.fromInt(Key, pressed.sym)) |sym| {
+                    //     if (sym == Key.backSpace)
+                    //         UI.backspace += 1
+                    //     else if (sym != Key.keyNULL and sym != Key.escape and std.ascii.isAscii(pressed.sym))
+                    // } else {
+                    //     // if (pressed.sym == Key.v and pressed.mod.contains(.Control)) UI.is_paste = true
+                    // }
+                }
+            }
+        }
         ctx.render();
     }
     ctx.close_window();
