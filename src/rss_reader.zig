@@ -56,7 +56,7 @@ const Renderer = struct {
     pub var scissor_stack: std.ArrayList(Box) = .empty;
     pub var print_debug = false;
 
-    pub fn render(_: *RendererContet) void {
+    pub fn render(_: *gl.Context) void {
         UI.resolve_input_event(); 
         UI.render();
         const num_of_ui = count_ui(UI.get_root_layout());
@@ -283,10 +283,9 @@ const Renderer = struct {
         }
     }
 };
-const RendererContet = gl.Context(Renderer);
 
 pub var gpa: Allocator = undefined; // @init_on_main
-pub var ctx: RendererContet = undefined; // @init_on_main
+pub var ctx: gl.Context = undefined; // @init_on_main
 
 const Box = struct {
     botleft: Vec2,
@@ -416,7 +415,7 @@ pub const UI = struct {
   
     pub var force_focus_on: []const u8 = "";
 
-    pub var mouse_icon = RendererContet.MouseIcon.mouse_normal;
+    pub var mouse_icon = gl.Context.MouseIcon.mouse_normal;
 
     pub const TextContent = union(enum) {
         ascii: []const u8,
@@ -1430,8 +1429,8 @@ fn update_data() void {
     }
 }
 
-const Key = RendererContet.Key;
-const KeyMod = RendererContet.KeyMod;
+const Key = gl.Context.Key;
+const KeyMod = gl.Context.KeyMod;
 
 pub fn main() !void {
     var gpa_state: std.heap.GeneralPurposeAllocator(.{}) = .{};
@@ -1468,9 +1467,7 @@ pub fn main() !void {
         UI.tmp_arena_state.deinit();
     }
 
-    var renderer = Renderer {};
-
-    try RendererContet.init(&ctx, &renderer, Renderer.render, "RSS Reader", 1920, 1024, gpa);
+    try gl.Context.init(&ctx, Renderer.render, "RSS Reader", 1920, 1024, gpa);
 
     UI.prev_pixel_scale = ctx.pixel_scale;
 
@@ -1490,7 +1487,7 @@ pub fn main() !void {
                         UI.backspace += 1
                     else if (codepoint <= std.math.maxInt(u8)) {
                         const ascii: u8 = @intCast(codepoint);
-                        if (ascii >= RendererContet.code_first_char and ascii <= RendererContet.code_last_char)
+                        if (ascii >= gl.Context.code_first_char and ascii <= gl.Context.code_last_char)
                             UI.input_chars.append(gpa, codepoint) catch @panic("OOM");
                     } else
                         UI.input_chars.append(gpa, codepoint) catch @panic("OOM");
