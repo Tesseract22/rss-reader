@@ -39,6 +39,10 @@ pub fn v2eq_approx(a: Vec2, b: Vec2) bool {
     std.math.approxEqAbs(f32, a[1], b[1], 0.0001);
 }
 
+pub fn v2splat(f: f32) Vec2 {
+    return .{ f, f };
+}
+
 const Renderer = struct {
     pub var batches: std.ArrayList([4]gl.BaseVertexData) = .empty;
     pub var batches_state: std.ArrayList(struct { BatchState, u64 }) = .empty;
@@ -115,19 +119,21 @@ const Renderer = struct {
     }
 
     fn draw_btn_effects(mouse_state: UI.EventSet, box: Box) void {
+        const border_radius_pixels = ctx.pixels(UI.BORDER_RADIUS);
         if (mouse_state.contains(.Down)) {
-            draw_rect(box.botleft, box.size, .from_u32(0x00000030));
+            draw_rect(box.botleft, box.size, border_radius_pixels, .from_u32(0x00000030));
         } else if (mouse_state.contains(.Hover)) {
-            draw_rect(box.botleft, box.size, .from_u32(0xffffff30));
+            draw_rect(box.botleft, box.size, border_radius_pixels, .from_u32(0xffffff30));
         }
        if (mouse_state.contains(.Hover) or mouse_state.contains(.Down)) 
-            draw_rect_lines(box.botleft, box.size, UI.BORDER_THICKNESS, .white);
+            draw_rect_lines(box.botleft, box.size, border_radius_pixels, UI.BORDER_THICKNESS, .white);
     }
 
     fn render_ui_impl(node: *const UI) void {
         const box = node.get_border_box();
-        draw_rect(box.botleft, box.size, node.bg_color);
-        draw_rect_lines(box.botleft, box.size, node.border_width, node.border_color);
+        const border_radius_pixels = ctx.pixels(node.border_radius);
+        draw_rect(box.botleft, box.size, border_radius_pixels, node.bg_color);
+        draw_rect_lines(box.botleft, box.size, border_radius_pixels, node.border_width, node.border_color);
 
 
         blk: {
@@ -166,24 +172,25 @@ const Renderer = struct {
             const cursor_box = Box.from_centerleft(
                 .{ end_of_text, content_box.botleft[1] + content_box.size[1]/2 },
                 .{ ctx.pixels(3), content_box.size[1] * 0.9 });
-            if (node.events.contains(.Focused)) draw_rect(cursor_box.botleft, cursor_box.size, .from_u32(0x7f7f7fff));
+            if (node.events.contains(.Focused)) draw_rect(cursor_box.botleft, cursor_box.size, border_radius_pixels, .from_u32(0x7f7f7fff));
 
         }
         if (node.flags.contains(.y_scroll) and node.should_enable_scroll()) {
             // Scroll bar background
-            draw_rect(.{ box.x_right()-UI.get_scroll_bar_w(), box.botleft[1] }, .{ UI.get_scroll_bar_w(), box.size[1] }, UI.TEXT_COLOR );
+            draw_rect(.{ box.x_right()-UI.get_scroll_bar_w(), box.botleft[1] }, .{ UI.get_scroll_bar_w(), box.size[1] }, border_radius_pixels, UI.TEXT_COLOR );
             const scroll_bar = node.get_scroll_bar_box();
 
             // Scroll bar
             draw_rect(
                 scroll_bar.botleft,
                 scroll_bar.size,
+                border_radius_pixels,
                 UI.COLOR1);
-            draw_rect_lines(scroll_bar.botleft, scroll_bar.size, node.border_width, node.border_color);
+            draw_rect_lines(scroll_bar.botleft, scroll_bar.size, border_radius_pixels, node.border_width, node.border_color);
             draw_btn_effects(node.scroll_mouse_event, scroll_bar);
         }
         if (node.flags.contains(.disabled)) {
-            draw_rect(box.botleft, box.size, .from_u32(0xffffff7f));
+            draw_rect(box.botleft, box.size, border_radius_pixels, .from_u32(0xffffff7f));
         }
 
         if (node.flags.contains(.layout)) {
@@ -195,7 +202,7 @@ const Renderer = struct {
         // draw_rect_lines(outer.botleft, outer.size, node.border_width, .white);
         if (node.flags.contains(.button)) draw_btn_effects(node.events, box);
         if (node.events.contains(.Focused))
-            draw_rect_lines(box.botleft, box.size, node.border_width, node.focus_border_color);
+            draw_rect_lines(box.botleft, box.size, border_radius_pixels, node.border_width, node.focus_border_color);
     }
 
     fn append_state(ct: usize) void {
@@ -214,17 +221,29 @@ const Renderer = struct {
         batches_state.append(gpa, .{ new_state, ct }) catch unreachable;
     }
 
-    fn draw_rect(botleft: Vec2, size: Vec2, rgba: RGBA) void {
-        switch_or_append_state(
-            .{ .tex = ctx.white_tex, .border_thickness = null, .shader = ctx.base_shader_pgm }, 1); 
-        batches.append(gpa, ctx.make_rect_vertex_data(botleft, size, rgba)) catch unreachable;
+    fn draw_rect(botleft: Vec2, size: Vec2, radius: f32, rgba: RGBA) void {
+        if (radius > 0) {
+            // TODO: optimize this
+            flush();
+            ctx.draw_rect_rounded(botleft, size, radius, rgba);
+        } else {
+            switch_or_append_state(
+                .{ .tex = ctx.white_tex, .border_thickness = null, .shader = ctx.base_shader_pgm }, 1); 
+            batches.append(gpa, ctx.make_rect_vertex_data(botleft, size, rgba)) catch unreachable;
+        }
     }
 
-    fn draw_rect_lines(botleft: Vec2, size: Vec2, thickness: f32, rgba: RGBA) void {
-        const border2 = Vec2 { ctx.pixels(thickness), ctx.pixels(thickness) };
-        switch_or_append_state(
-            .{ .tex = ctx.white_tex, .border_thickness = thickness, .shader = ctx.base_shader_pgm }, 1); 
-        batches.append(gpa, ctx.make_rect_vertex_data(v2add(botleft, border2), v2sub(size, v2scal(border2, 1)), rgba)) catch unreachable;
+    fn draw_rect_lines(botleft: Vec2, size: Vec2, radius: f32, thickness: f32, rgba: RGBA) void {
+        if (radius > 0) {
+            // TODO: optimize this
+            flush();
+            ctx.draw_rect_rounded_lines(botleft, size, radius, thickness, rgba);
+        } else {
+            const border2 = Vec2 { ctx.pixels(thickness), ctx.pixels(thickness) };
+            switch_or_append_state(
+                .{ .tex = ctx.white_tex, .border_thickness = thickness, .shader = ctx.base_shader_pgm }, 1); 
+            batches.append(gpa, ctx.make_rect_vertex_data(v2add(botleft, border2), v2sub(size, v2scal(border2, 1)), rgba)) catch unreachable;
+        }
     }
 
     // TODO: handle text overflow
@@ -446,7 +465,8 @@ pub const UI = struct {
     bg_color: RGBA = COLOR1,
     border_color: RGBA = COLOR2,
     focus_border_color: RGBA = COLOR4,
-    border_width: f32 = 2,
+    border_width: f32 = UI.BORDER_THICKNESS,
+    border_radius: f32 = UI.BORDER_RADIUS,
     padding: Vec2 = .{ 0, 0 },
     margin: Vec2 = .{ 0, 0 },
     abs_offset: Vec2 = .{ 0, 0 },
@@ -555,6 +575,7 @@ pub const UI = struct {
 
     const TEXT_COLOR = RGBA.from_u32(0xd3dad9ff).gamma(GAMMA);
 
+    const BORDER_RADIUS = 5;
     const BORDER_THICKNESS = 3;
 
 
@@ -605,7 +626,7 @@ pub const UI = struct {
             }
             {
             _ = push_layout(.X, "#header", .{ .w_strategy = .rest_of_parent, .h_strategy = .fit_children, .bg_color = COLOR3, .border_color = RGBA.from_u32(0x715a5aff).gamma(1)});
-            if (text_btn("Add#header", .{ .font_scale = 0.4, .padding = .{ 10, 10 }, .bg_color = .transparent, .border_color = RGBA.from_u32(0x715a5aff).gamma(1) }))
+            if (text_btn("Add#header", .{ .font_scale = 0.4, .padding = .{ 10, 10 }, .bg_color = .transparent, .border_color = RGBA.from_u32(0x715a5aff).gamma(1), .border_radius = 0 }))
                 display_add_popup = true;
             pop_layout();
             }
@@ -706,7 +727,8 @@ pub const UI = struct {
         bg_color: RGBA = COLOR1,
         border_color: RGBA = COLOR2,
         focus_border_color: RGBA = COLOR4,
-        border_width: f32 = 2,
+        border_width: f32 = UI.BORDER_THICKNESS,
+        border_radius: f32 = UI.BORDER_RADIUS,
         padding: Vec2 = .{ 0, 0 },
         margin: Vec2 = .{ 0, 0 },
         abs_offset: Vec2 = .{ 0, 0 },
