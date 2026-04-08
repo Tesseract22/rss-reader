@@ -173,8 +173,8 @@ const Renderer = struct {
                 .{ end_of_text, content_box.botleft[1] + content_box.size[1]/2 },
                 .{ ctx.pixels(3), content_box.size[1] * 0.9 });
             if (node.events.contains(.Focused)) draw_rect(cursor_box.botleft, cursor_box.size, border_radius_pixels, .from_u32(0x7f7f7fff));
-
         }
+
         if (node.flags.contains(.y_scroll) and node.should_enable_scroll()) {
             // Scroll bar background
             draw_rect(.{ box.x_right()-UI.get_scroll_bar_w(), box.botleft[1] }, .{ UI.get_scroll_bar_w(), box.size[1] }, border_radius_pixels, UI.TEXT_COLOR );
@@ -198,9 +198,8 @@ const Renderer = struct {
                 if (child.flags.contains(.absolute)) render_ui_impl(child);
             }
         }
-        // const outer = node.get_outer_box();
-        // draw_rect_lines(outer.botleft, outer.size, node.border_width, .white);
-        if (node.flags.contains(.button)) draw_btn_effects(node.events, box);
+        if (node.flags.contains(.button))
+            draw_btn_effects(node.events, box);
         if (node.events.contains(.Focused))
             draw_rect_lines(box.botleft, box.size, border_radius_pixels, node.border_width, node.focus_border_color);
     }
