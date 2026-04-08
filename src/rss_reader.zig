@@ -1134,7 +1134,7 @@ pub const UI = struct {
         mouse_state.setPresent(.Clicked, hover and ctx.is_mouse_released(.mouse_left));
         mouse_state.setPresent(.Down, hover and ctx.is_mouse_down(.mouse_left));
         mouse_state.setPresent(.Focused, mouse_state.contains(.Clicked));
-        mouse_state.setPresent(.Unfocused, !mouse_state.contains(.Hover) and ctx.is_mouse_released(.mouse_left));
+        mouse_state.setPresent(.Unfocused, !mouse_state.contains(.Hover) and (ctx.is_mouse_released(.mouse_left) or ctx.is_key_released(.Escape)));
         return mouse_state;
     }
 
@@ -1142,7 +1142,7 @@ pub const UI = struct {
         const is_prev_focused = node.events.contains(.Focused);
         node.events = .initEmpty();
         if (node.flags.contains(.disabled)) return;
-        node.events.setPresent(.Focused, is_prev_focused and !ctx.is_mouse_released(.mouse_left));
+        node.events.setPresent(.Focused, is_prev_focused and !(ctx.is_mouse_released(.mouse_left) or ctx.is_key_released(.Escape)));
         // FIXME: use scissor?
         // const border = node.get_border_box().intersect(parent_border) orelse return;
         const border = node.get_border_box();
