@@ -132,7 +132,11 @@ const Renderer = struct {
     fn render_ui_impl(node: *const UI) void {
         const box = node.get_border_box();
         const border_radius_pixels = ctx.pixels(node.border_radius);
-        draw_rect(box.botleft, box.size, border_radius_pixels, node.bg_color);
+        if (node.bg_tex.id > 0) {
+            draw_tex(box.botleft, box.size, node.bg_tex);
+        } else {
+            draw_rect(box.botleft, box.size, border_radius_pixels, node.bg_color);
+        }
         draw_rect_lines(box.botleft, box.size, border_radius_pixels, node.border_width, node.border_color);
 
 
@@ -230,6 +234,13 @@ const Renderer = struct {
                 .{ .tex = ctx.white_tex, .border_thickness = null, .shader = ctx.base_shader_pgm }, 1); 
             batches.append(gpa, ctx.make_rect_vertex_data(botleft, size, rgba)) catch unreachable;
         }
+    }
+
+    fn draw_tex(botleft: Vec2, size: Vec2, tex: gl.Texture) void {
+        const rgba = RGBA.white;
+        switch_or_append_state(
+            .{ .tex = tex, .border_thickness = null, .shader = ctx.base_shader_pgm }, 1); 
+        batches.append(gpa, ctx.make_rect_vertex_data(botleft, size, rgba)) catch unreachable;
     }
 
     fn draw_rect_lines(botleft: Vec2, size: Vec2, radius: f32, thickness: f32, rgba: RGBA) void {
@@ -461,6 +472,7 @@ pub const UI = struct {
     children: std.ArrayList(*UI) = .empty,
     text_content: TextContent = .{ .ascii = "" },
     font_scale: f32 = 1,
+    bg_tex: gl.Texture = .{ .w = 0, .h = 0, .id = 0 },
     bg_color: RGBA = COLOR1,
     border_color: RGBA = COLOR2,
     focus_border_color: RGBA = COLOR4,
@@ -519,6 +531,8 @@ pub const UI = struct {
     var post_search_str: []const u21 = &.{};
     var add_url_status: []const u8 = " ";
     var display_add_popup = false;
+
+    pub var copy_tex: gl.Texture = undefined; // @init_on_main;
 
     const INVALID_INDEX = std.math.maxInt(u32);
 
@@ -625,7 +639,7 @@ pub const UI = struct {
             }
             {
             _ = push_layout(.X, "#header", .{ .w_strategy = .rest_of_parent, .h_strategy = .fit_children, .bg_color = COLOR3, .border_color = RGBA.from_u32(0x715a5aff).gamma(1)});
-            if (text_btn("Add#header", .{ .font_scale = 0.4, .padding = .{ 10, 10 }, .bg_color = .transparent, .border_color = RGBA.from_u32(0x715a5aff).gamma(1), .border_radius = 0 }))
+            if (text_btn("Add#header", .{ .font_scale = 0.4, .padding = .{ 10, 10 }, .bg_tex = UI.copy_tex, .bg_color = .transparent, .border_color = RGBA.from_u32(0x715a5aff).gamma(1), .border_radius = 0 }))
                 display_add_popup = true;
             pop_layout();
             }
@@ -701,6 +715,20 @@ pub const UI = struct {
                                 .font_scale = 0.4,
                                 .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .fit_text,
                             });
+                        _ = push_layout(.X, frame_fmt("{s}#detail_link_layout", .{ post.link }), 
+                            .{
+                                .padding = .{ 10, 10 }, .margin = .{ 0, 0 },
+                                .border_color = .transparent, .bg_color = .transparent,
+                                .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .fit_children
+
+                            });
+                        _ = texture(frame_fmt("#{s}detail_link_icon", .{ post.link }), 
+                            .{ 
+                                .padding = .{ 10, 10 }, .margin = .{ 0, 0 },
+                                .border_color = .transparent, .bg_tex = copy_tex,
+                                .font_scale = 0.4,
+                                .w_strategy = .{ .fixed_in_normalized = ctx.cal_font_h(0.4) }, .h_strategy = .{ .fixed_in_normalized = ctx.cal_font_h(0.4) },
+                            });
                         _ = text_btn(frame_fmt("{s}#detail_link", .{ post.link }), 
                             .{ 
                                 .padding = .{ 10, 10 }, .margin = .{ 0, 0 },
@@ -708,6 +736,7 @@ pub const UI = struct {
                                 .font_scale = 0.4,
                                 .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .fit_text,
                             });
+                        pop_layout();
                         pop_layout();
                     }
                 }
@@ -723,6 +752,7 @@ pub const UI = struct {
 
     const UIOptions = struct {
         font_scale: f32 = 1,
+        bg_tex: gl.Texture = .{ .w = 0, .h = 0, .id = 0 },
         bg_color: RGBA = COLOR1,
         border_color: RGBA = COLOR2,
         focus_border_color: RGBA = COLOR4,
@@ -841,6 +871,14 @@ pub const UI = struct {
         const ui = new(content, opts);     
 
         ui.text_content = .{ .ascii = preprocess_text(content) };
+        ui.flags.setPresent(.button, true);
+        ui.add_to_layout();
+        return ui.events.contains(.Clicked);
+    }
+
+    pub fn texture(str_hash: []const u8, opts: UIOptions) bool {
+        const ui = new(str_hash, opts);     
+
         ui.flags.setPresent(.button, true);
         ui.add_to_layout();
         return ui.events.contains(.Clicked);
@@ -1491,6 +1529,7 @@ pub fn main() !void {
     try gl.Context.init(&ctx, Renderer.render, "RSS Reader", 1920, 1024, gpa);
 
     UI.prev_pixel_scale = ctx.pixel_scale;
+    UI.copy_tex = gl.Texture.from_png_memory(@embedFile("resources/icons/copy.png"));
 
     var db_worker_t = try std.Thread.spawn(.{}, db_worker, .{});
     while (!ctx.window_should_close()) {
