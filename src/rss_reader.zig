@@ -133,7 +133,7 @@ const Renderer = struct {
         const box = node.get_border_box();
         const border_radius_pixels = ctx.pixels(node.border_radius);
         if (node.bg_tex.id > 0) {
-            draw_tex(box.botleft, box.size, node.bg_tex);
+            draw_icon(box.botleft, box.size, node.bg_tex);
         } else {
             draw_rect(box.botleft, box.size, border_radius_pixels, node.bg_color);
         }
@@ -236,10 +236,10 @@ const Renderer = struct {
         }
     }
 
-    fn draw_tex(botleft: Vec2, size: Vec2, tex: gl.Texture) void {
+    fn draw_icon(botleft: Vec2, size: Vec2, tex: gl.Texture) void {
         const rgba = RGBA.white;
         switch_or_append_state(
-            .{ .tex = tex, .border_thickness = null, .shader = ctx.base_shader_pgm }, 1); 
+            .{ .tex = tex, .border_thickness = null, .shader = ctx.font_shader_pgm }, 1); 
         batches.append(gpa, ctx.make_rect_vertex_data(botleft, size, rgba)) catch unreachable;
     }
 
@@ -639,7 +639,7 @@ pub const UI = struct {
             }
             {
             _ = push_layout(.X, "#header", .{ .w_strategy = .rest_of_parent, .h_strategy = .fit_children, .bg_color = COLOR3, .border_color = RGBA.from_u32(0x715a5aff).gamma(1)});
-            if (text_btn("Add#header", .{ .font_scale = 0.4, .padding = .{ 10, 10 }, .bg_tex = UI.copy_tex, .bg_color = .transparent, .border_color = RGBA.from_u32(0x715a5aff).gamma(1), .border_radius = 0 }))
+            if (text_btn("Add#header", .{ .font_scale = 0.4, .padding = .{ 10, 10 }, .bg_color = .transparent, .border_color = RGBA.from_u32(0x715a5aff).gamma(1), .border_radius = 0 }))
                 display_add_popup = true;
             pop_layout();
             }
@@ -715,23 +715,27 @@ pub const UI = struct {
                                 .font_scale = 0.4,
                                 .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .fit_text,
                             });
-                        _ = push_layout(.X, frame_fmt("{s}#detail_link_layout", .{ post.link }), 
+                        const link_copy = push_layout(.X, frame_fmt("#{s}detail_link_layout", .{ post.link }), 
                             .{
-                                .padding = .{ 10, 10 }, .margin = .{ 0, 0 },
+                                .padding = .{ 10, 10 }, .margin = .{ 0, 10 },
                                 .border_color = .transparent, .bg_color = .transparent,
-                                .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .fit_children
+                                .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .fit_children,
+                                .flags = .initOne(.button),
 
                             });
+                        if (link_copy.is_clicked()) {
+                            ctx.set_clipboard(post.link); 
+                        }
                         _ = texture(frame_fmt("#{s}detail_link_icon", .{ post.link }), 
                             .{ 
-                                .padding = .{ 10, 10 }, .margin = .{ 0, 0 },
+                                .padding = .{ 0, 0 }, .margin = .{ 10, 10 },
                                 .border_color = .transparent, .bg_tex = copy_tex,
                                 .font_scale = 0.4,
                                 .w_strategy = .{ .fixed_in_normalized = ctx.cal_font_h(0.4) }, .h_strategy = .{ .fixed_in_normalized = ctx.cal_font_h(0.4) },
                             });
-                        _ = text_btn(frame_fmt("{s}#detail_link", .{ post.link }), 
+                        _ = text(frame_fmt("{s}#detail_link", .{ post.link }), 
                             .{ 
-                                .padding = .{ 10, 10 }, .margin = .{ 0, 0 },
+                                .padding = .{ 0, 10 }, .margin = .{ 0, 0 },
                                 .border_color = .transparent, .bg_color = .transparent,
                                 .font_scale = 0.4,
                                 .w_strategy = .{ .parent_perct = 1 }, .h_strategy = .fit_text,
@@ -879,7 +883,6 @@ pub const UI = struct {
     pub fn texture(str_hash: []const u8, opts: UIOptions) bool {
         const ui = new(str_hash, opts);     
 
-        ui.flags.setPresent(.button, true);
         ui.add_to_layout();
         return ui.events.contains(.Clicked);
     }
@@ -909,7 +912,7 @@ pub const UI = struct {
                 ui.input.set_dirty();
             }
 
-            if (ctx.is_paste) {
+            if (UI.is_paste) {
                 const buf = ctx.clipboard();
                 ui.input.cursor += gl.append_utf8_slice(&ui.input.utf8_storage, gpa, buf) catch @panic("TODO: handle invalid utf8 sequence");
                 ui.input.set_dirty();
@@ -964,7 +967,7 @@ pub const UI = struct {
                 ui.input.set_dirty();
             }
 
-            if (ctx.is_paste) {
+            if (UI.is_paste) {
                 // TODO: validate ascii
                 const buf = ctx.clipboard();
                 ui.input.ascii_storage.appendSlice(gpa, buf) catch @panic("OOM");
@@ -1176,7 +1179,29 @@ pub const UI = struct {
         return mouse_state;
     }
 
+    // Algorithms:
+    //
+    // Recurse into the UI tree, and check if events occur post-order, meaning that event is first checked at the children.
+    // Events that happened in the child can be bubbled up to the parents:
     fn resolve_input_event_impl(node: *UI, happened: *EventSet) void {
+
+        const listen_mask = blk: {
+            var mask = EventSet.initEmpty(); // events that this node is interested in.
+            if (node.flags.contains(.focusable)) {
+                mask.setPresent(.Focused, true);
+                mask.setPresent(.Unfocused, true);
+            }
+            if (node.flags.contains(.button)) {
+                mask.setPresent(.Hover, true);
+                mask.setPresent(.Clicked, true);
+                mask.setPresent(.Down, true);
+            }
+            if (node.flags.contains(.input_box)) {
+                mask.setPresent(.Hover, true);
+                mask.setPresent(.Clicked, true);
+            }
+            break :blk mask;
+        };
         const is_prev_focused = node.events.contains(.Focused);
         node.events = .initEmpty();
         if (node.flags.contains(.disabled)) return;
@@ -1184,8 +1209,7 @@ pub const UI = struct {
         // FIXME: use scissor?
         // const border = node.get_border_box().intersect(parent_border) orelse return;
         const border = node.get_border_box();
-        node.events.setUnion(handle_mouse(border));
-        if (!node.flags.contains(.focusable)) node.events.setPresent(.Focused, false);
+        node.events.setUnion(handle_mouse(border).intersectWith(listen_mask));
         if (force_focus_on.len > 0) {
             node.events.setPresent(.Focused, std.mem.eql(u8, node.str_hash, force_focus_on));
         }
@@ -1198,9 +1222,9 @@ pub const UI = struct {
         for (node.children.items) |child| {
             resolve_input_event_impl(child, happened);
         }
-    
+
         happened.setPresent(.Unfocused, false);
-        node.events.setIntersection(happened.complement());
+        node.events.setIntersection(happened.complement()); // Events that has occured in the child, cannnot happened in the parent again
         happened.setUnion(node.events);
     }
 
@@ -1318,11 +1342,16 @@ pub const UI = struct {
             node.resolved_origin = .{ ctx.x_left(), ctx.y_top() };
         }
 
+        const margin_padding = Vec2 {
+            ctx.pixels(node.padding[0] + node.margin[0]),
+            ctx.pixels(node.padding[1] + node.margin[1]),
+        };
+
         resolve_size_pre_order(maybe_parent, node); 
         {
             var largest_child = Vec2 { 0, 0 };  
-            node.layout_offset[0] += ctx.pixels(node.padding[0] + node.margin[0]);
-            node.layout_offset[1] -= ctx.pixels(node.padding[1] + node.margin[1]);
+            node.layout_offset[0] = margin_padding[0];
+            node.layout_offset[1] = -margin_padding[1];
             for (node.children.items) |child| {
                 // before recurring into this function, make sure the origin of `node` is resolved
                 if (child.flags.contains(.absolute)) continue;
@@ -1337,8 +1366,9 @@ pub const UI = struct {
                 for (0..2) |i|
                     largest_child[i] = @max(largest_child[i], child.resolved_size[i]);
             }
-            node.children_bounding_size[0] = @max(largest_child[0], ctx.pixels(node.padding[0] + node.margin[0]) + @abs(node.layout_offset[0]));
-            node.children_bounding_size[1] = @max(largest_child[1], ctx.pixels(node.padding[1] + node.margin[1]) + @abs(node.layout_offset[1]));
+            
+            node.children_bounding_size[0] = @max(largest_child[0] + margin_padding[0], @abs(node.layout_offset[0])) + margin_padding[0];
+            node.children_bounding_size[1] = @max(largest_child[1] + margin_padding[1], @abs(node.layout_offset[1])) + margin_padding[1];
         }
         resolve_size_post_order(maybe_parent, node);
         for (node.children.items) |child| {
@@ -1350,6 +1380,10 @@ pub const UI = struct {
             offset_origin_recursive(child, .{ 0, node.scroll_offset * node.children_bounding_size[1]});
         }
 
+    }
+
+    pub fn is_clicked(self: *UI) bool {
+        return self.events.contains(.Clicked);
     }
 };
 
@@ -1529,7 +1563,7 @@ pub fn main() !void {
     try gl.Context.init(&ctx, Renderer.render, "RSS Reader", 1920, 1024, gpa);
 
     UI.prev_pixel_scale = ctx.pixel_scale;
-    UI.copy_tex = gl.Texture.from_png_memory(@embedFile("resources/icons/copy.png"));
+    UI.copy_tex = gl.Texture.from_png_memory_rgba(@embedFile("resources/icons/copy.png"));
 
     var db_worker_t = try std.Thread.spawn(.{}, db_worker, .{});
     while (!ctx.window_should_close()) {
@@ -1538,11 +1572,8 @@ pub fn main() !void {
         UI.is_paste = false;
         while (ctx.poll_event()) |event| {
             switch (event) {
-                .composition => |composition| {
-
-                    UI.input_chars.appendSlice(gpa, composition.codepoints) catch @panic("OOM");
-                },
                 .key_char => |codepoint| {
+                    // if (pressed.sym == Key.v and pressed.mod.contains(.Control)) UI.is_paste = true
                     if (codepoint == @intFromEnum(Key.BackSpace))
                         UI.backspace += 1
                     else if (codepoint <= std.math.maxInt(u8)) {
@@ -1551,13 +1582,10 @@ pub fn main() !void {
                             UI.input_chars.append(gpa, codepoint) catch @panic("OOM");
                     } else
                         UI.input_chars.append(gpa, codepoint) catch @panic("OOM");
-                    // if (std.enums.fromInt(Key, pressed.sym)) |sym| {
-                    //     if (sym == Key.backSpace)
-                    //         UI.backspace += 1
-                    //     else if (sym != Key.keyNULL and sym != Key.escape and std.ascii.isAscii(pressed.sym))
-                    // } else {
-                    //     // if (pressed.sym == Key.v and pressed.mod.contains(.Control)) UI.is_paste = true
-                    // }
+                },
+                .key_pressed => |key_pressed| {
+                    if (key_pressed.key == .C and key_pressed.mod.contains(.Control))
+                        UI.is_paste = true;
                 }
             }
         }

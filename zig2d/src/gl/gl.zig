@@ -164,8 +164,6 @@ pub const Context = struct {
 
     composition_codepoints: std.ArrayList(u21),
 
-    is_paste: bool,
-
     last_frame_time_us: i64,
     delta_time_us: i64,
 
@@ -259,7 +257,6 @@ pub const Context = struct {
 
         self.a = gpa;
         self.composition_codepoints = .empty;
-        self.is_paste = false;
 
         self.last_frame_time_us = std.time.microTimestamp();
         self.delta_time_us = 0;
@@ -271,7 +268,6 @@ pub const Context = struct {
         self.mouse_delta = .{ 0, 0 };
 
         self.composition_codepoints.clearRetainingCapacity();
-        self.is_paste = false;
 
         const t = std.time.microTimestamp();
         self.delta_time_us = t - self.last_frame_time_us;
@@ -314,7 +310,7 @@ pub const Context = struct {
 
     pub const Event = union(enum) {
         key_char: u21,
-        composition: struct { bytes: []const u8, codepoints: []const u21 },
+        key_pressed: struct { key: Key, mod: std.EnumSet(KeyMod) },
     };
 
     pub fn poll_event(self: *Self) ?Event {
@@ -337,29 +333,19 @@ pub const Context = struct {
                     self.mouse_scroll[1] += event.delta.y;
                 },
 
-                // c.RGFW_keyPressed => {
-                //     // const ch = event.key.sym;
-                //     // if (ch == @intFromEnum(Key.backSpace)) self.backspace += 1
-                //     // else if (event.key.value == 'v'  and (event.key.mod & c.RGFW_modControl) != 0) self.is_paste = true
-                //     // else if (ch != 0 and ch != @intFromEnum(Key.escape) and std.ascii.isAscii(ch))
-                //     //     self.input_chars.append(self.a, ch) catch @panic("OOM");
-                //     var mod_set = std.EnumSet(KeyMod).initEmpty();
-                //     mod_set.bits.mask = @intCast(event.key.mod);
-                //     log("sym: {}|{c}|{}", .{ event.key.sym, event.key.sym, event.key.value });
-                //     return Event { .key_pressed = .{ .sym = event.key.sym, .mod = mod_set }};
-                // },
+                c.RGFW_keyPressed => {
+                    // FIXME: very slow
+                    var mod_set = std.EnumSet(KeyMod).initEmpty();
+                    const mod_raw = event.key.mod;
+                    const enum_info = @typeInfo(KeyMod).@"enum";
+                    inline for (enum_info.fields) |f| {
+                        if ((mod_raw & f.value) != 0) mod_set.setPresent(@enumFromInt(f.value), true);
+                    }
+                    return Event { .key_pressed = .{ .key = @enumFromInt(event.key.value), .mod = mod_set }};
+                },
                 c.RGFW_keyChar => {
-                    // var out: [4]u8 = undefined;
-                    // const out_len = std.unicode.utf8Encode(@intCast(event.keyChar.value), &out) catch unreachable;
-                    // log("key char: {}|{s}", .{ event.keyChar.value,  out[0..out_len] });
                     return Event { .key_char = @intCast(event.keyChar.value) };
                 },
-                // c.RGFW_compositionCommitted => {
-                //     log("composition", .{});
-                //     const slice = std.mem.sliceTo(event.composition.commited_result, 0);
-                //     _ = append_utf8_slice(&self.composition_codepoints, self.a, slice) catch @panic("TODO: handle invalid utf8 sequence");
-                //     return Event { .composition = .{ .bytes = slice, .codepoints = self.composition_codepoints.items } };
-                // },
                 else => {},
             }
         }
@@ -1202,7 +1188,7 @@ pub fn log(comptime fmt: []const u8, args: anytype) void {
     std.debug.print("\n", .{});
 }
 
-fn load_shader(src: [:0]const u8, kind: c_uint) ShaderError!g.GLuint {
+pub fn load_shader(src: [:0]const u8, kind: c_uint) ShaderError!g.GLuint {
     const shader = g.glCreateShader(kind);
     g.glShaderSource(shader, 1, &src.ptr, null);
     g.glCompileShader(shader);
@@ -1218,13 +1204,13 @@ fn load_shader(src: [:0]const u8, kind: c_uint) ShaderError!g.GLuint {
     return shader;
 }
 
-fn create_program_from_src(vs_src: [:0]const u8, fs_src: [:0]const u8) ProgramError!g.GLuint {
+pub fn create_program_from_src(vs_src: [:0]const u8, fs_src: [:0]const u8) ProgramError!g.GLuint {
     const vs = try load_shader(vs_src, g.GL_VERTEX_SHADER);
     const fs = try load_shader(fs_src, g.GL_FRAGMENT_SHADER);
     return create_program(vs, fs);
 }
 
-fn create_program(vs: GLObj, fs: GLObj) ProgramError!g.GLuint {
+pub fn create_program(vs: GLObj, fs: GLObj) ProgramError!g.GLuint {
     const pgm = g.glCreateProgram();
     g.glAttachShader(pgm, vs);
     g.glAttachShader(pgm, fs);

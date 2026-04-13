@@ -30,7 +30,18 @@ pub fn from_u32rgba_memory(w: c_uint, h: c_uint, data: [*]const RGBA) GLObj {
     return id;
 }
 
-pub fn from_png_memory(data: []const u8) Texture {
+pub fn from_u8greyscale_memory(w: c_uint, h: c_uint, data: [*]const u8) GLObj {
+    var id: GLObj = undefined;
+    g.glGenTextures(1, &id);
+    g.glBindTexture(g.GL_TEXTURE_2D, id);
+    g.glTexImage2D(g.GL_TEXTURE_2D, 0, g.GL_RGBA, 
+        @intCast(w), @intCast(h), 0, g.GL_RED, g.GL_UNSIGNED_BYTE, data);
+    g.glGenerateMipmap(g.GL_TEXTURE_2D);
+    
+    return id;
+}
+
+pub fn from_png_memory_rgba(data: []const u8) Texture {
     var tex: Texture = undefined;
     var out_ptr: [*]u8 = undefined;
     const err = c.lodepng_decode32(@ptrCast(&out_ptr), &tex.w, &tex.h, data.ptr, data.len);
@@ -41,6 +52,21 @@ pub fn from_png_memory(data: []const u8) Texture {
         @panic("FATAL");
     }
     tex.id = from_u32rgba_memory(tex.w, tex.h, @ptrCast(@alignCast(out_ptr)));
+   
+    return tex;
+}
+
+pub fn from_png_memory_greyscale(data: []const u8) Texture {
+    var tex: Texture = undefined;
+    var out_ptr: [*]u8 = undefined;
+    const err = c.lodepng_decode_memory(@ptrCast(&out_ptr), &tex.w, &tex.h, data.ptr, data.len, c.LCT_GREY, 8);
+    defer std.c.free(out_ptr);
+    if (err != 0) {
+        log("ERROR: cannot decode png [{}] {s}", 
+            .{ err, c.lodepng_error_text(err) }); 
+        @panic("FATAL");
+    }
+    tex.id = from_u8greyscale_memory(tex.w, tex.h, @ptrCast(@alignCast(out_ptr)));
    
     return tex;
 }

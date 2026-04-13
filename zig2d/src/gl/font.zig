@@ -105,7 +105,7 @@ pub const Static = struct {
 
         g.glTexImage2D(g.GL_TEXTURE_2D, 0,
             g.GL_R8,
-            @intCast(atlas_size[0]), @intCast(atlas_size[1]), 0, g.GL_RED, g.GL_UNSIGNED_BYTE, font_bitmap.ptr);
+            @intCast(atlas_size[0]), @intCast(atlas_size[1]), 0, g.GL_ALPHA, g.GL_UNSIGNED_BYTE, font_bitmap.ptr);
         g.glTexParameteri(g.GL_TEXTURE_2D, g.GL_TEXTURE_MIN_FILTER, g.GL_LINEAR);
         g.glTexParameteri(g.GL_TEXTURE_2D, g.GL_TEXTURE_MAG_FILTER, g.GL_LINEAR);
         g.glTexParameteri(g.GL_TEXTURE_2D, g.GL_TEXTURE_WRAP_S, g.GL_REPEAT);
@@ -197,6 +197,8 @@ pub const Dynamic = struct {
         g.glTexParameteri(g.GL_TEXTURE_2D, g.GL_TEXTURE_MAG_FILTER, g.GL_LINEAR);
         g.glTexParameteri(g.GL_TEXTURE_2D, g.GL_TEXTURE_WRAP_S, g.GL_REPEAT);
         g.glTexParameteri(g.GL_TEXTURE_2D, g.GL_TEXTURE_WRAP_T, g.GL_REPEAT);
+        const swizzleMask: [4]g.GLint = .{ g.GL_ZERO, g.GL_ZERO, g.GL_ZERO, g.GL_RED};
+        g.glTexParameteriv(g.GL_TEXTURE_2D, g.GL_TEXTURE_SWIZZLE_RGBA, &swizzleMask);
 
         return .{
             .gpa = gpa,
